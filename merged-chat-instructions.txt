@@ -1,0 +1,293 @@
+============================================================
+MERGED TWITCH + YOUTUBE CHAT OVERLAY — SETUP & USAGE
+============================================================
+
+FILES (keep all three together in the same folder)
+  merged-chat.html          The real overlay. Your channel + API key
+                            go in here. This is the one you load in OBS.
+  merged-chat-example.html  A clean copy with NO channel/key filled in
+                            (safe to share or back up). Uses the default
+                            font; Teko left as an option.
+  merged-chat-instructions.txt   This file.
+
+------------------------------------------------------------
+WHAT IT IS
+------------------------------------------------------------
+  One scrolling chat feed that merges Twitch and YouTube live chat
+  into a single list. Each message is tagged with the platform's
+  LOGO on a colored badge:
+      Twitch  = white Twitch glyph on a purple badge
+      YouTube = white play button on a red badge
+  Built as a transparent overlay for use as an OBS Browser source.
+
+------------------------------------------------------------
+HOW IT WORKS (why it needs what it needs)
+------------------------------------------------------------
+  - Twitch: connects anonymously over WebSocket (IRC). No account,
+    no key. Works immediately.
+  - YouTube: live chat CANNOT be read from an iframe (cross-origin),
+    so it uses the YouTube Data API v3, which requires a free API
+    key tied to a Google account. Without the key, the Twitch half
+    still works; the YouTube half stays empty.
+  - Both work from a plain file:// page, so NO local web server is
+    needed.
+
+------------------------------------------------------------
+VISUAL FEATURES (what you'll see)
+------------------------------------------------------------
+  - Platform logo badge on every message (Twitch / YouTube).
+  - Broadcaster gets a small VIDEO-CAMERA icon on a gold tag
+    (works for both the Twitch broadcaster and the YouTube channel
+    owner).
+  - Moderators get a green "MOD" tag.
+  - Usernames are colored: Twitch uses each chatter's own color;
+    everyone else gets a stable auto-generated color from their name.
+  - Twitch emotes are rendered as images.
+  - New messages pop in with a quick animation.
+  - All text has a black outline so it stays readable over any video,
+    and the page background is transparent for OBS.
+  - Connection status box (top-left) shows one line PER platform,
+    e.g.:
+        Twitch: connected to #yourchannel
+        YouTube: connected to Your Channel Name
+    It auto-hides after a few seconds (configurable — see STATUS_HIDE_SEC).
+
+------------------------------------------------------------
+STEP 1 — EDIT THE CONFIG (top of merged-chat.html)
+------------------------------------------------------------
+Open merged-chat.html in a text editor (right-click -> Edit, or
+open with Notepad). Near the top, find the CONFIG block.
+
+REQUIRED — who to connect to:
+    TWITCH_CHANNEL : "your_channel"   <- your twitch channel (lowercase)
+    YT_VIDEO_ID    : "VIDEO_ID"       <- the v=... id from the youtube URL
+    YT_API_KEY     : "YOUR_API_KEY"   <- paste your YouTube Data API key
+
+  - The YouTube video ID is the part after "v=" in the watch /
+    live_chat URL. Example:
+      https://www.youtube.com/live_chat?is_popout=1&v=VIDEO_ID
+      -> the ID is the "VIDEO_ID" part
+  - Leave TWITCH_CHANNEL blank ("") to run YouTube only, or leave the
+    YouTube fields blank to run Twitch only.
+
+OPTIONAL — appearance & behavior:
+    MAX_MESSAGES : 80     how many lines stay on screen at once
+    SHOW_BACKLOG : false  false = only show NEW messages after load
+                          (recommended). true = also show the recent
+                          messages that already existed when it loaded.
+    SHOW_STATUS  : true   show the connection status box, top-left
+                          (set to false to hide it completely).
+    STATUS_HIDE_SEC : 12  seconds the status box stays on screen before
+                          fading out. Set to 0 to keep it visible
+                          permanently (handy while testing).
+    FONT_SIZE_PX : 24     base text size (see CHANGING THE FONT below).
+    DARK_BG_COLOR : "#2a2a2e"  the background shade used ONLY when the
+                          page is opened with ?bg=dark (see "DARK
+                          BACKGROUND FOR AN OBS DOCK" below). Has no
+                          effect on the normal transparent overlay.
+
+OPTIONAL — fade-out (auto-remove old messages):
+    FADE_OUT          : true  on/off. true = each message fades away
+                              after its lifetime; false = messages stay
+                              until pushed off by MAX_MESSAGES.
+    MESSAGE_LIFE_SEC  : 30    seconds a message stays fully visible
+                              before it begins to fade.
+    FADE_DURATION_SEC : 1     how long the fade animation itself takes.
+
+    Example: FADE_OUT true, MESSAGE_LIFE_SEC 30, FADE_DURATION_SEC 1
+    means a message shows for 30s, then fades out over 1s and is
+    removed. Set FADE_OUT to false for a classic always-on chat list.
+
+OPTIONAL — testing:
+    DEMO_MODE : false   true = show fake test messages (no stream or
+                        keys needed). Set back to false before going live.
+
+Save the file after editing, then Refresh the source in OBS.
+
+------------------------------------------------------------
+CHANGING THE FONT
+------------------------------------------------------------
+  merged-chat.html ships using the "Teko" font (a tall, condensed
+  Google Font) at FONT_SIZE_PX 24.
+
+  To change fonts, find this line in the <style> section:
+      font-family: "Teko", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  - To go back to the plain default look, remove the "Teko", part:
+      font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  - To use a different Google Font, change the <link ...> near the top
+    of the file to that font, then put its name first in font-family.
+
+  NOTE: Teko is condensed, so it reads smaller than normal fonts.
+  Teko ~24px looks about the same size as a normal font at ~18px.
+  Adjust FONT_SIZE_PX to taste after switching.
+
+  (merged-chat-example.html is set the opposite way: default font at
+  18px, with Teko left available as a commented option.)
+
+------------------------------------------------------------
+STEP 2 — GET A FREE YOUTUBE API KEY (~3 minutes)
+------------------------------------------------------------
+  a. Go to  https://console.cloud.google.com/
+  b. Create a project (top bar -> New Project). Any name is fine.
+  c. APIs & Services -> Library -> search "YouTube Data API v3"
+     -> click it -> Enable.
+  d. APIs & Services -> Credentials -> Create Credentials -> API key.
+  e. Copy the key and paste it into YT_API_KEY in the CONFIG block.
+
+  *** IMPORTANT ***
+  On the key's settings, leave "Application restrictions" set to NONE.
+  If you add an "HTTP referrers" restriction, requests from a file://
+  page (OBS) get BLOCKED and the YouTube side will silently show
+  nothing.
+
+  KEEP IT PRIVATE: the key sits in plain text inside merged-chat.html.
+  Don't screen-share or post that file. Share merged-chat-example.html
+  instead (it has no key).
+
+------------------------------------------------------------
+STEP 3 — ADD IT TO OBS
+------------------------------------------------------------
+  1. In OBS: Sources -> + -> Browser  (give it a name -> OK).
+  2. Tick "Local file" and Browse to merged-chat.html.
+  3. Set Width / Height — see "HOW TO SIZE IT" below.
+  4. Click OK.
+  5. Whenever you change the CONFIG, right-click the source ->
+     Refresh (OBS caches the page).
+
+------------------------------------------------------------
+HOW TO SIZE IT IN OBS
+------------------------------------------------------------
+There are TWO different sizes, and mixing them up is the usual
+cause of tiny text or cut-off messages:
+
+  A) The Browser source RESOLUTION (the Width / Height fields in
+     the source's Properties window).
+       - This is the actual canvas the chat page renders into.
+       - The feed is a tall vertical list, so a portrait size works
+         best, e.g.  400 x 800   (try 350-450 wide, 600-1000 tall).
+       - Text size is controlled by FONT_SIZE_PX in the CONFIG, NOT
+         by this box. If text looks too small/large, change
+         FONT_SIZE_PX in merged-chat.html and Refresh — do not just
+         stretch the source.
+       - Rule of thumb: set Width/Height here to roughly the real
+         pixel size you want it on screen, then leave it.
+
+  B) The on-canvas SIZE (the red box you drag in the main preview).
+       - After adding the source you can drag its corners to move and
+         scale it in your scene.
+       - IMPORTANT: dragging the corners SCALES (zooms) the rendered
+         page — it does NOT give it more room. Scaling up = blurry /
+         huge text; scaling down = tiny text.
+       - For crisp text, get it close to right with the Width/Height
+         in (A), then only fine-tune position here.
+       - To reset scaling: right-click the source -> Transform ->
+         Reset Transform (sets it back to 1:1 with its resolution).
+
+RECOMMENDED WORKFLOW
+  1. Add the source with Width 400, Height 800 (a starting point).
+  2. Position it where you want in the scene (drag to move, not
+     resize).
+  3. If text is too small or too big, change FONT_SIZE_PX in the
+     CONFIG and Refresh the source — repeat until it looks right.
+  4. If you need a wider/taller area, change the Width/Height in the
+     source Properties (step A), not by dragging corners.
+
+  Tip: to make the chat area taller/shorter without changing text
+  size, adjust the Height in (A). To fit more/fewer lines on screen,
+  also tune MAX_MESSAGES in the CONFIG.
+
+QUICK SIZE PRESETS  (FONT_SIZE_PX values are for the DEFAULT font;
+with Teko, add about +6 since it reads smaller)
+  - Narrow side-rail beside gameplay:   320 x 720,  FONT_SIZE_PX 16
+  - Standard vertical overlay:          400 x 800,  FONT_SIZE_PX 18
+  - Big, readable "just chatting":      480 x 900,  FONT_SIZE_PX 22
+
+------------------------------------------------------------
+DARK BACKGROUND FOR AN OBS DOCK
+------------------------------------------------------------
+  The overlay is transparent by design so it composites cleanly over
+  your video as a Browser SOURCE. But if you also load it as a docked
+  panel (Browser dock), OBS paints docks on WHITE, which is too bright.
+
+  To get a dark background in the DOCK only, add  ?bg=dark  to the end
+  of the file URL:
+      file:///D:/.../merged-chat.html?bg=dark
+  (You can also end the URL with  #dark  instead — same effect.)
+
+  - WITHOUT the flag (your normal stream Browser source): stays fully
+    transparent. Nothing changes for the on-stream overlay.
+  - WITH the flag (the dock): the page renders on a dark background
+    (default #2a2a2e). Change the shade via DARK_BG_COLOR in CONFIG.
+
+  Why not use a color-key filter to fake transparency instead?
+  Don't — OBS Browser sources already give TRUE alpha transparency, so
+  no key is needed on stream. Color-keying a dark background would also
+  eat the black text outlines and any dark pixels in emotes/usernames,
+  leaving crunchy, artifact-y edges. The ?bg=dark trick keeps the
+  stream pixel-perfect while only the dock goes dark.
+
+------------------------------------------------------------
+TESTING WITHOUT YOUR OWN STREAM
+------------------------------------------------------------
+  Option 1 — test the REAL YouTube feed:
+    The API can read ANY public live stream's chat. Find any live
+    YouTube stream with chat enabled, copy its video ID (the v=...
+    part), paste it into YT_VIDEO_ID, and Refresh. Messages will
+    flow in using your API key. Put your own video ID back later.
+
+  Option 2 — test the LOOK with fake messages (no stream, no key):
+    In the CONFIG set  DEMO_MODE : true  and Refresh. Fake Twitch +
+    YouTube messages (with the occasional MOD / broadcaster tag)
+    appear every ~1.2s so you can check the font, icons, fade-out,
+    and layout. Set DEMO_MODE back to false before going live.
+
+  Tip while testing: set STATUS_HIDE_SEC : 0 so the connection box
+  stays on screen and you can confirm both platforms connected.
+
+------------------------------------------------------------
+TROUBLESHOOTING
+------------------------------------------------------------
+  The status box (top-left, when SHOW_STATUS is true) shows one line
+  per platform and reports exactly what each side is doing:
+
+  "Twitch: connected to #name"      -> Twitch is working.
+  "YouTube: connected to <channel>" -> YouTube is working.
+
+  "YouTube: no API key set"          -> paste your key into CONFIG.
+  "YouTube: no active live chat"     -> the stream isn't live, or the
+                                        video ID is wrong. YouTube only
+                                        returns chat while the stream
+                                        is actually LIVE.
+  "YouTube API: ..." / 403 errors    -> key not enabled for YouTube
+                                        Data API v3, or the key has an
+                                        HTTP-referrer restriction (set
+                                        restrictions to None).
+  "YouTube: quotaExceeded"           -> daily API quota used up; resets
+                                        at midnight US Pacific time.
+  "Twitch: connecting…" forever      -> check the channel name is
+                                        spelled correctly and lowercase.
+  Twitch connected but no messages   -> nobody has chatted yet, or
+                                        SHOW_BACKLOG is false so only
+                                        NEW messages show.
+  Nothing appears at all             -> right-click the OBS source ->
+                                        Refresh; confirm you picked the
+                                        correct .html file.
+
+  To test outside OBS: just double-click merged-chat.html to open it
+  in your browser. The Twitch side will connect live right away. Press
+  F12 -> Console to see detailed log messages.
+
+------------------------------------------------------------
+NOTES / LIMITS
+------------------------------------------------------------
+  - The YouTube stream must be LIVE for messages to come through.
+  - The YouTube Data API has a daily quota (10,000 units). Polling a
+    single chat is fine for normal stream lengths; very long streams
+    could exhaust it (chat would then stop until the quota resets at
+    midnight US Pacific time).
+  - Text has a black outline baked in for readability over any video;
+    the page background is transparent for OBS.
+  - The Teko font and Twitch/YouTube emotes load from the internet,
+    so OBS needs an internet connection (it normally has one).
+============================================================

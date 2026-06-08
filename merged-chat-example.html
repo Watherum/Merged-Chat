@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Merged Chat — Twitch + YouTube</title>
+
+<!-- Teko font from Google Fonts (OBS has internet access, so this loads fine) -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Teko:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<!-- =======================================================================
+     MERGED TWITCH + YOUTUBE CHAT OVERLAY
+     One scrolling feed, messages interleaved, each tagged by platform.
+
+     ---- QUICK START ------------------------------------------------------
+     1. Edit the CONFIG block below:
+          - TWITCH_CHANNEL : your twitch channel name (lowercase)
+          - YT_VIDEO_ID    : the live video ID (the v=... part of the URL)
+          - YT_API_KEY     : your YouTube Data API v3 key  (see HOW TO GET)
+     2. Save the file.
+     3. In OBS: add a Browser source -> tick "Local file" -> pick this file.
+          Set width/height to your overlay size (e.g. 400 x 800).
+     4. Right-click the source -> Refresh whenever you change config.
+
+     ---- HOW TO GET A YOUTUBE API KEY (free, ~3 min) ----------------------
+       a. Go to https://console.cloud.google.com/
+       b. Create a project (top bar -> New Project) — any name.
+       c. APIs & Services -> Library -> search "YouTube Data API v3"
+          -> click it -> Enable.
+       d. APIs & Services -> Credentials -> Create Credentials -> API key.
+       e. Copy the key into YT_API_KEY below.
+       IMPORTANT: under the key's settings, leave "Application restrictions"
+       set to NONE. An "HTTP referrers" restriction will BLOCK requests from
+       a file:// page (OBS) and the YouTube side will silently fail.
+
+     ---- NOTES ------------------------------------------------------------
+       * The YouTube stream must be LIVE for messages to come through.
+       * Data API has a daily quota (10,000 units). Polling one chat is
+         fine for normal stream lengths; very long streams may exhaust it.
+       * Twitch needs nothing — it connects anonymously.
+     ====================================================================== -->
+
+<script>
+/* ============================= CONFIG ============================= */
+const CONFIG = {
+  TWITCH_CHANNEL : "",        // <-- your twitch channel (lowercase)
+  YT_VIDEO_ID    : "",        // <-- the v=... id from the youtube URL
+  YT_API_KEY     : "",        // <-- paste your YouTube Data API key here
+
+  MAX_MESSAGES   : 80,    // how many messages to keep on screen
+  SHOW_BACKLOG   : false, // false = only show NEW messages after load (recommended)
+  SHOW_STATUS    : true,  // show the small connection status line (top-left)
+  STATUS_HIDE_SEC : 12,   // seconds before the status box auto-hides (0 = never hide)
+  FONT_SIZE_PX   : 18,    // base text size
+
+  FADE_OUT       : true,  // true = old messages fade out and disappear after a while
+  MESSAGE_LIFE_SEC : 30,  // seconds a message stays before it starts fading (FADE_OUT only)
+  FADE_DURATION_SEC: 1,   // how long the fade-out animation takes
+
+  DEMO_MODE      : false, // true = show fake test messages (no stream/keys needed).
+                          // Set back to false before going live!
+
+  // Dock background: the stream Browser SOURCE stays transparent (true alpha).
+  // To get a dark background in an OBS *docked* view, add ?bg=dark to the URL,
+  // e.g.  file:///D:/.../merged-chat.html?bg=dark   (or end the URL with #dark).
+  // DARK_BG_COLOR sets the shade used when ?bg=dark is present.
+  DARK_BG_COLOR  : "#2a2a2e",
+};
+/* ================================================================= */
+</script>
+
+<style>
+  :root { --fs: 18px; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: transparent;          /* transparent for OBS overlay */
+    overflow: hidden;
+    /* Default font. To use Teko instead, add "Teko", at the front:
+       font-family: "Teko", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+       (Teko is condensed/smaller, so bump FONT_SIZE_PX up to ~24 if you do) */
+    font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  /* Feed grows from the bottom, like a real chat */
+  #feed {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 4px;
+    padding: 10px;
+    box-sizing: border-box;
+    max-height: 100%;
+  }
+
+  .msg {
+    font-size: var(--fs);
+    line-height: 1.35;
+    color: #fff;
+    /* Strong outline so text stays readable over any video */
+    text-shadow:
+      -1px -1px 0 #000, 1px -1px 0 #000,
+      -1px  1px 0 #000, 1px  1px 0 #000,
+       0    0   4px #000;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    animation: pop 0.18s ease-out;
+  }
+
+  @keyframes pop {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* applied to old messages when FADE_OUT is on; duration set from JS */
+  .msg.fade-out {
+    opacity: 0;
+    transition: opacity var(--fade-dur, 1s) ease-out;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7em;
+    font-weight: 700;
+    line-height: 1;
+    padding: 3px 5px;
+    border-radius: 4px;
+    margin-right: 6px;
+    vertical-align: middle;
+    color: #fff;
+    text-shadow: none;
+  }
+  .badge.yt { background: #ff0033; }
+  .badge.tw { background: #9147ff; }
+  .badge svg {
+    width: 1.05em;
+    height: 1.05em;
+    display: block;
+    fill: currentColor;   /* white glyph */
+  }
+
+  .name {
+    font-weight: 700;
+    margin-right: 2px;
+  }
+  .name::after { content: ":"; color: #fff; }
+
+  .text { color: #fff; }
+
+  .emote {
+    height: 1.4em;
+    vertical-align: middle;
+    margin: 0 1px;
+  }
+
+  /* small mod / owner marker */
+  .tag {
+    display: inline-block;
+    font-size: 0.62em;
+    font-weight: 700;
+    padding: 2px 4px;
+    border-radius: 3px;
+    margin-right: 5px;
+    vertical-align: middle;
+    text-shadow: none;
+    color: #fff;
+  }
+  .tag.owner { background: #e8a200; }
+  .tag.mod   { background: #00a152; }
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .tag svg {
+    width: 1.2em;
+    height: 1.2em;
+    display: block;
+    fill: currentColor;   /* white glyph */
+  }
+
+  #status {
+    position: absolute;
+    top: 6px;
+    left: 8px;
+    font-size: 12px;
+    font-family: monospace;
+    line-height: 1.6;
+    color: #ddd;
+    background: rgba(0,0,0,0.55);
+    padding: 6px 10px;
+    border-radius: 4px;
+    max-width: 90%;
+    transition: opacity 0.6s;
+    z-index: 10;
+  }
+  #status.hidden { opacity: 0; }
+</style>
+</head>
+
+<body>
+  <div id="status">starting…</div>
+  <div id="feed"></div>
+
+<script>
+/* ----------------------------- setup ----------------------------- */
+document.documentElement.style.setProperty("--fs", CONFIG.FONT_SIZE_PX + "px");
+document.documentElement.style.setProperty("--fade-dur", CONFIG.FADE_DURATION_SEC + "s");
+
+// Dark background for OBS docks: opt-in via ?bg=dark (or #dark) in the URL.
+// Stream Browser sources omit this, so they keep a transparent (alpha) background.
+(function applyBackground() {
+  const wantsDark = /(\?|&)bg=dark\b/.test(location.search) || location.hash === "#dark";
+  if (wantsDark) {
+    document.documentElement.style.background = CONFIG.DARK_BG_COLOR;
+    document.body.style.background = CONFIG.DARK_BG_COLOR;
+  }
+})();
+const feed = document.getElementById("feed");
+const statusEl = document.getElementById("status");
+if (!CONFIG.SHOW_STATUS) statusEl.style.display = "none";
+
+// One status line per source (twitch / youtube / demo), each on its own row.
+const statusLines = {};
+let statusTimer = null;
+function status(key, msg) {
+  console.log("[merged-chat]", key + ":", msg);
+  statusLines[key] = msg;
+  if (!CONFIG.SHOW_STATUS) return;
+  statusEl.innerHTML = Object.values(statusLines)
+    .filter(Boolean)
+    .map(escapeHtml)
+    .join("<br>");
+  statusEl.classList.remove("hidden");
+  clearTimeout(statusTimer);
+  if (CONFIG.STATUS_HIDE_SEC > 0) {
+    statusTimer = setTimeout(() => statusEl.classList.add("hidden"), CONFIG.STATUS_HIDE_SEC * 1000);
+  }
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// stable per-name color when the platform doesn't give us one
+function colorFor(name) {
+  let h = 0;
+  for (const c of String(name)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return `hsl(${h % 360}, 70%, 66%)`;
+}
+
+// Platform logos as inline SVGs (no external image needed)
+const TWITCH_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="Twitch"><path d="M11.571 4.714h1.715v5.143H11.57zm4.715 0H18v5.143h-1.714zM6 0L1.714 4.286v15.428h5.143V24l4.286-4.286h3.428L22.286 12V0zm14.571 11.143l-3.428 3.428h-3.429l-3 3v-3H6.857V1.714h13.714Z"/></svg>`;
+const YOUTUBE_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="YouTube"><path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>`;
+// Video-camera icon used for the broadcaster tag
+const CAMERA_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="Broadcaster"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>`;
+
+function addMessage({ platform, name, color, html, owner, mod }) {
+  const row = document.createElement("div");
+  row.className = "msg " + platform;
+
+  let tagHtml = "";
+  if (owner) tagHtml += `<span class="tag owner">${CAMERA_ICON}</span>`;
+  else if (mod) tagHtml += `<span class="tag mod">MOD</span>`;
+
+  const badgeInner = platform === "yt" ? YOUTUBE_ICON : TWITCH_ICON;
+
+  row.innerHTML =
+    `<span class="badge ${platform}">${badgeInner}</span>` +
+    tagHtml +
+    `<span class="name" style="color:${color}">${escapeHtml(name)}</span> ` +
+    `<span class="text">${html}</span>`;
+
+  feed.appendChild(row);
+  while (feed.children.length > CONFIG.MAX_MESSAGES) {
+    feed.removeChild(feed.firstChild);
+  }
+
+  // Optional: fade out and remove this message after it has lived its lifetime
+  if (CONFIG.FADE_OUT) {
+    setTimeout(() => {
+      row.classList.add("fade-out");
+      setTimeout(() => row.remove(), CONFIG.FADE_DURATION_SEC * 1000);
+    }, CONFIG.MESSAGE_LIFE_SEC * 1000);
+  }
+}
+
+/* ============================= TWITCH ============================= */
+/* Anonymous IRC over WebSocket — no key, no account needed.         */
+function parseIRC(line) {
+  let tags = {}, rest = line;
+  if (rest[0] === "@") {
+    const sp = rest.indexOf(" ");
+    for (const part of rest.slice(1, sp).split(";")) {
+      const eq = part.indexOf("=");
+      tags[part.slice(0, eq)] = part.slice(eq + 1);
+    }
+    rest = rest.slice(sp + 1);
+  }
+  let prefix = "";
+  if (rest[0] === ":") {
+    const sp = rest.indexOf(" ");
+    prefix = rest.slice(1, sp);
+    rest = rest.slice(sp + 1);
+  }
+  const sp = rest.indexOf(" ");
+  const command = sp === -1 ? rest : rest.slice(0, sp);
+  let params = sp === -1 ? "" : rest.slice(sp + 1);
+
+  let middle = params, text = "";
+  if (params.startsWith(":")) { text = params.slice(1); middle = ""; }
+  else {
+    const ci = params.indexOf(" :");
+    if (ci !== -1) { text = params.slice(ci + 2); middle = params.slice(0, ci); }
+  }
+  return { tags, prefix, command, middle, text };
+}
+
+// Replace Twitch emote ranges (from IRC tags) with emote images.
+function renderTwitch(text, emotesTag) {
+  const chars = Array.from(text); // code-point aware (Twitch indexes by code point)
+  if (!emotesTag) return escapeHtml(text);
+
+  const reps = [];
+  for (const group of emotesTag.split("/")) {
+    if (!group) continue;
+    const [id, positions] = group.split(":");
+    for (const pos of positions.split(",")) {
+      const [s, e] = pos.split("-").map(Number);
+      reps.push({ start: s, end: e, id });
+    }
+  }
+  reps.sort((a, b) => a.start - b.start);
+
+  let out = "", idx = 0;
+  for (const r of reps) {
+    out += escapeHtml(chars.slice(idx, r.start).join(""));
+    const name = chars.slice(r.start, r.end + 1).join("");
+    out += `<img class="emote" src="https://static-cdn.jtvnw.net/emoticons/v2/${r.id}/default/dark/1.0" alt="${escapeHtml(name)}" title="${escapeHtml(name)}">`;
+    idx = r.end + 1;
+  }
+  out += escapeHtml(chars.slice(idx).join(""));
+  return out;
+}
+
+function connectTwitch() {
+  if (!CONFIG.TWITCH_CHANNEL) { status("twitch", "Twitch: no channel set"); return; }
+  status("twitch", "Twitch: connecting to #" + CONFIG.TWITCH_CHANNEL + "…");
+  const ws = new WebSocket("wss://irc-ws.chat.twitch.tv:443");
+
+  ws.onopen = () => {
+    ws.send("CAP REQ :twitch.tv/tags twitch.tv/commands");
+    ws.send("NICK justinfan" + Math.floor(Math.random() * 100000)); // anonymous
+    ws.send("JOIN #" + CONFIG.TWITCH_CHANNEL.toLowerCase());
+    status("twitch", "Twitch: connected to #" + CONFIG.TWITCH_CHANNEL);
+  };
+
+  ws.onmessage = (ev) => {
+    for (const line of ev.data.split("\r\n")) {
+      if (!line) continue;
+      if (line.startsWith("PING")) { ws.send("PONG :tmi.twitch.tv"); continue; }
+
+      const m = parseIRC(line);
+      if (m.command !== "PRIVMSG") continue;
+
+      const nick = m.prefix.split("!")[0];
+      const name = m.tags["display-name"] || nick;
+      const color = m.tags["color"] || colorFor(name);
+      const badges = m.tags["badges"] || "";
+
+      addMessage({
+        platform: "tw",
+        name,
+        color,
+        html: renderTwitch(m.text, m.tags["emotes"]),
+        owner: badges.includes("broadcaster"),
+        mod: badges.includes("moderator"),
+      });
+    }
+  };
+
+  ws.onclose = () => {
+    status("twitch", "Twitch: disconnected, reconnecting in 3s…");
+    setTimeout(connectTwitch, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+/* ============================= YOUTUBE ============================ */
+/* YouTube Data API v3 — needs an API key (see header comment).      */
+async function startYouTube() {
+  if (!CONFIG.YT_API_KEY) { status("youtube", "YouTube: no API key set (Twitch only)"); return; }
+  if (!CONFIG.YT_VIDEO_ID) { status("youtube", "YouTube: no video ID set"); return; }
+
+  status("youtube", "YouTube: connecting…");
+  try {
+    const r = await fetch(
+      `https://www.googleapis.com/youtube/v3/videos?part=snippet,liveStreamingDetails&id=${CONFIG.YT_VIDEO_ID}&key=${CONFIG.YT_API_KEY}`
+    );
+    const d = await r.json();
+    if (d.error) { status("youtube", "YouTube: " + (d.error.message || "API error")); return; }
+
+    const item = d.items?.[0];
+    const chatId = item?.liveStreamingDetails?.activeLiveChatId;
+    if (!chatId) { status("youtube", "YouTube: no active live chat (is the stream live?)"); return; }
+
+    const channel = item?.snippet?.channelTitle || "channel";
+    status("youtube", "YouTube: connected to " + channel);
+    pollYouTube(chatId, "", true);
+  } catch (e) {
+    status("youtube", "YouTube error: " + e.message);
+  }
+}
+
+async function pollYouTube(chatId, pageToken, first) {
+  try {
+    const url =
+      `https://www.googleapis.com/youtube/v3/liveChat/messages` +
+      `?liveChatId=${chatId}&part=snippet,authorDetails&key=${CONFIG.YT_API_KEY}` +
+      (pageToken ? `&pageToken=${pageToken}` : "");
+
+    const r = await fetch(url);
+    const d = await r.json();
+    if (d.error) { status("youtube", "YouTube API: " + (d.error.message || "error")); return; }
+
+    // Skip the initial backlog so we start clean (unless SHOW_BACKLOG is on)
+    if (!(first && !CONFIG.SHOW_BACKLOG)) {
+      for (const it of d.items || []) {
+        const a = it.authorDetails;
+        addMessage({
+          platform: "yt",
+          name: a.displayName,
+          color: colorFor(a.displayName),
+          html: escapeHtml(it.snippet.displayMessage || ""),
+          owner: a.isChatOwner,
+          mod: a.isChatModerator,
+        });
+      }
+    }
+
+    const wait = Math.max(d.pollingIntervalMillis || 5000, 2000);
+    setTimeout(() => pollYouTube(chatId, d.nextPageToken, false), wait);
+  } catch (e) {
+    status("youtube", "YouTube poll error: " + e.message);
+    setTimeout(() => pollYouTube(chatId, pageToken, first), 5000);
+  }
+}
+
+/* ============================== DEMO ============================= */
+/* Fake messages for testing the look without a stream or API key.   */
+function startDemo() {
+  const names = ["alice", "Bob_TTV", "carol99", "DangerDan", "emily_x",
+                 "GamerGirl", "h4 x0r", "IzzyLol", "JoeKing", "kevin"];
+  const lines = ["hi everyone!", "that was insane", "gg", "first time catching you live",
+                 "poggers", "how's it going?", "let's gooo", "what game is this?",
+                 "nice play 👏", "🔥🔥🔥", "welcome back", "LMAO", "o7", "cracked"];
+  const pick = (a) => a[Math.floor(Math.random() * a.length)];
+
+  setInterval(() => {
+    const platform = Math.random() < 0.5 ? "yt" : "tw";
+    const name = pick(names);
+    const roll = Math.random();
+    addMessage({
+      platform,
+      name,
+      color: colorFor(name),
+      html: escapeHtml(pick(lines)),
+      owner: roll > 0.95,                 // ~5% broadcaster
+      mod: roll > 0.85 && roll <= 0.95,   // ~10% mod
+    });
+  }, 1200);
+
+  status("demo", "DEMO MODE — showing fake messages (set DEMO_MODE:false to go live)");
+}
+
+/* ============================== GO =============================== */
+if (CONFIG.DEMO_MODE) {
+  startDemo();
+} else {
+  connectTwitch();
+  startYouTube();
+}
+</script>
+</body>
+</html>
