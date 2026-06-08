@@ -65,6 +65,20 @@ const CONFIG = {
   // e.g. 15000 = poll every 15s. A 2s hard floor always applies.
   YT_MIN_POLL_MS : 0,
 
+  // YouTube custom / membership emotes: ":shortcode:" -> image URL. YouTube's API
+  // only sends the shortcode text (no image), so map them here to render images.
+  // HOW TO FILL THIS:
+  //   - SHORTCODE: the text form shown in chat, e.g. ":_happy:" (keep the colons).
+  //     Tip: open this overlay's console (F12) — any unmapped shortcode that comes
+  //     through live chat is logged, so you can copy the exact text.
+  //   - URL: right-click the emote in your YouTube live chat -> "Copy image address".
+  YT_EMOTES : {
+    // Map your channel's member emotes here: ":shortcode:" -> image URL. Right-click
+    // an emote in your YouTube live chat -> "Copy image address" for the URL; confirm
+    // the exact shortcode in the F12 console (it logs any unmapped ones). Example:
+    // ":_happy:" : "https://yt3.googleusercontent.com/XXXX=s48-c-k-nd",
+  },
+
   MAX_MESSAGES   : 80,    // how many messages to keep on screen
   SHOW_BACKLOG   : false, // false = only show NEW messages after load (recommended)
   SHOW_STATUS    : true,  // show the small connection status line (top-left)
@@ -191,8 +205,12 @@ const CONFIG = {
     text-shadow: none;
     color: #fff;
   }
-  .tag.owner { background: #e8a200; }
-  .tag.mod   { background: #00a152; }
+  .tag.owner  { background: #e8a200; }
+  .tag.mod    { background: #00a152; }
+  .tag.vip    { background: #e005b9; }
+  .tag.sub    { background: #e02d2d; gap: 2px; }  /* Twitch subscriber */
+  .tag.member { background: #e02d2d; }            /* YouTube member */
+  .tag .mo    { font-size: 0.85em; font-weight: 700; line-height: 1; }
   .tag {
     display: inline-flex;
     align-items: center;
@@ -203,6 +221,12 @@ const CONFIG = {
     height: 1.2em;
     display: block;
     fill: currentColor;   /* white glyph */
+  }
+  /* Make the moderator sword bigger and give it a dark edge so it pops on green */
+  .tag.mod svg {
+    width: 1.45em;
+    height: 1.45em;
+    filter: drop-shadow(0 0 0.5px rgba(0,0,0,.55));
   }
 
   #status {
@@ -299,14 +323,26 @@ const YOUTUBE_ICON =
 // Video-camera icon used for the broadcaster tag
 const CAMERA_ICON =
   `<svg viewBox="0 0 24 24" aria-label="Broadcaster"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>`;
+// Shield-with-check icon used for the moderator tag
+const MOD_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="Moderator"><path fill-rule="evenodd" d="M12 2.5 19.5 5 19.5 11.5 C19.5 16 16 19.5 12 21.5 C8 19.5 4.5 16 4.5 11.5 L4.5 5Z M10.9 16 7.2 12.3 8.7 10.8 10.9 13 15.3 8.6 16.8 10.1Z"/></svg>`;
+// Gem icon used for the VIP tag
+const VIP_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="VIP"><path d="M6 3h12l4 6-10 12L2 9zm.84 2L4.3 8.5h4.2zm10.32 0L15.5 8.5h4.2zM12 5.4 9.7 8.5h4.6zM4.9 10.5l5.1 6.7-2.8-6.7zm6.2 0L12 17l.9-6.5zm4.9 0-2.3 6.7 5.1-6.7z"/></svg>`;
+// Star icon shared by Twitch subscribers and YouTube members
+const STAR_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="Subscriber"><path d="M12 3 14.116 9.088 20.56 9.219 15.424 13.112 17.29 19.281 12 15.6 6.71 19.281 8.576 13.112 3.44 9.219 9.884 9.088Z"/></svg>`;
 
-function addMessage({ platform, name, color, html, owner, mod }) {
+function addMessage({ platform, name, color, html, owner, mod, vip, sub, subMonths, member }) {
   const row = document.createElement("div");
   row.className = "msg " + platform;
 
   let tagHtml = "";
   if (owner) tagHtml += `<span class="tag owner">${CAMERA_ICON}</span>`;
-  else if (mod) tagHtml += `<span class="tag mod">MOD</span>`;
+  else if (mod) tagHtml += `<span class="tag mod">${MOD_ICON}</span>`;
+  else if (vip) tagHtml += `<span class="tag vip">${VIP_ICON}</span>`;
+  else if (sub) tagHtml += `<span class="tag sub">${STAR_ICON}${subMonths ? `<span class="mo">${subMonths}</span>` : ""}</span>`;
+  else if (member) tagHtml += `<span class="tag member">${STAR_ICON}</span>`;
 
   const badgeInner = platform === "yt" ? YOUTUBE_ICON : TWITCH_ICON;
 
@@ -388,6 +424,34 @@ function renderTwitch(text, emotesTag) {
   return out;
 }
 
+// YouTube only sends emotes as :shortcode: text (no image data), so we map known
+// shortcodes to image URLs ourselves (see CONFIG.YT_EMOTES). Any shortcode we DON'T
+// have a URL for is logged once to the console (F12) to make filling the map easy.
+const _ytSeenShortcodes = new Set();
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function renderYouTube(text) {
+  const map = CONFIG.YT_EMOTES || {};
+  for (const m of text.matchAll(/:_?[\w+-]{2,}:/g)) {
+    if (!map[m[0]] && !_ytSeenShortcodes.has(m[0])) {
+      _ytSeenShortcodes.add(m[0]);
+      console.log("[merged-chat] unmapped YouTube emote shortcode:", m[0]);
+    }
+  }
+  const codes = Object.keys(map).sort((a, b) => b.length - a.length); // longest first
+  if (!codes.length) return escapeHtml(text);
+
+  const re = new RegExp(codes.map(escapeRegex).join("|"), "g");
+  let out = "", last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    out += escapeHtml(text.slice(last, m.index));
+    const code = m[0];
+    out += `<img class="emote" src="${map[code]}" alt="${escapeHtml(code)}" title="${escapeHtml(code)}">`;
+    last = m.index + code.length;
+  }
+  out += escapeHtml(text.slice(last));
+  return out;
+}
+
 // Collect every channel to join from TWITCH_CHANNEL + TWITCH_CHANNELS,
 // normalized (lowercase, no leading '#', trimmed) and de-duplicated.
 function twitchChannels() {
@@ -429,6 +493,13 @@ function connectTwitch() {
       const name = m.tags["display-name"] || nick;
       const color = m.tags["color"] || colorFor(name);
       const badges = m.tags["badges"] || "";
+      const badgeInfo = m.tags["badge-info"] || "";
+      const isSub = badges.includes("subscriber") || badges.includes("founder");
+      // Exact cumulative months live in badge-info; fall back to the badges tier.
+      const subMatch = isSub
+        ? (/(?:subscriber|founder)\/(\d+)/.exec(badgeInfo) ||
+           /(?:subscriber|founder)\/(\d+)/.exec(badges))
+        : null;
 
       addMessage({
         platform: "tw",
@@ -437,6 +508,9 @@ function connectTwitch() {
         html: renderTwitch(m.text, m.tags["emotes"]),
         owner: badges.includes("broadcaster"),
         mod: badges.includes("moderator"),
+        vip: badges.includes("vip"),
+        sub: isSub,
+        subMonths: subMatch ? subMatch[1] : "",
       });
     }
   };
@@ -519,9 +593,10 @@ async function pollYouTube(chatId, pageToken, first, statusKey) {
           platform: "yt",
           name: a.displayName,
           color: colorFor(a.displayName),
-          html: escapeHtml(it.snippet.displayMessage || ""),
+          html: renderYouTube(it.snippet.displayMessage || ""),
           owner: a.isChatOwner,
           mod: a.isChatModerator,
+          member: a.isChatSponsor,
         });
       }
     }
@@ -539,25 +614,87 @@ async function pollYouTube(chatId, pageToken, first, statusKey) {
 
 /* ============================== DEMO ============================= */
 /* Fake messages for testing the look without a stream or API key.   */
-function startDemo() {
+async function startDemo() {
   const names = ["alice", "Bob_TTV", "carol99", "DangerDan", "emily_x",
                  "GamerGirl", "h4 x0r", "IzzyLol", "JoeKing", "kevin"];
   const lines = ["hi everyone!", "that was insane", "gg", "first time catching you live",
                  "poggers", "how's it going?", "let's gooo", "what game is this?",
-                 "nice play 👏", "🔥🔥🔥", "welcome back", "LMAO", "o7", "cracked"];
+                 "nice play 👏", "🔥🔥🔥", "welcome back", "LMAO", "o7", "cracked",
+                 "🔥👏😂🎉💯", "GGGG 🎉🎉🎉🎉", "let's gooooo 🚀🚀🚀", "this song is such a vibe 🎶😎",
+                 "no wayyy did you see that clutch?? my heart literally stopped for a second 😭",
+                 "been watching since the start and this is easily the best run all week 🙌",
+                 "ok but can we talk about how clean that movement was, cracked aim ngl 🎯",
+                 "first time catching the stream live, love the content keep it up!! 💜💜",
+                 "the most chill stream I've found, community seems super wholesome 🥹",
+                 "wait what just happened, looked away for two seconds and chat is going crazy 💀💀",
+                 "stream looks so crisp today, did you change something with the setup? 👀"];
   const pick = (a) => a[Math.floor(Math.random() * a.length)];
+
+  // Demo emotes. Globals (render anywhere) are the always-available fallback; the
+  // configured channel's REAL emotes are fetched below and merged in, so the demo
+  // automatically reflects whatever channel this file is set up for.
+  const EMOTES = {
+    Kappa: "25", LUL: "425618", PogChamp: "305954156", Kreygasm: "41",
+    "4Head": "354", "<3": "9", SeemsGood: "64138", NotLikeThis: "58765",
+  };
+  // Pull a channel's emotes (name -> id) from ivr.fi — public, no auth, CORS-open.
+  async function fetchChannelEmotes(login) {
+    if (!login) return;
+    try {
+      const r = await fetch(`https://api.ivr.fi/v2/twitch/emotes/channel/${encodeURIComponent(login)}`);
+      if (!r.ok) return;
+      const d = await r.json();
+      for (const sp of d.subProducts || [])
+        for (const e of sp.emotes || [])
+          if (e.code && e.id) EMOTES[e.code] = e.id;
+    } catch (_) { /* offline / CORS / no emotes: just use the globals */ }
+  }
+  const channels = [CONFIG.TWITCH_CHANNEL, ...(CONFIG.TWITCH_CHANNELS || [])].filter(Boolean);
+  await Promise.all(channels.map(fetchChannelEmotes));
+  const emoteNames = Object.keys(EMOTES);
+
+  const emoteUrl = (id) => `https://static-cdn.jtvnw.net/emoticons/v2/${id}/default/dark/2.0`;
+  // Swap known emote words for their Twitch images; escape everything else.
+  const demoRender = (text) => text.split(" ").map((w) =>
+    EMOTES[w]
+      ? `<img class="emote" src="${emoteUrl(EMOTES[w])}" alt="${w}">`
+      : escapeHtml(w)
+  ).join(" ");
+  // Randomly sprinkle a few emotes onto a message (used for Twitch demo rows).
+  const withEmotes = (text) => {
+    if (!emoteNames.length || Math.random() > 0.45) return text;
+    const n = 1 + Math.floor(Math.random() * 3);
+    const e = Array.from({ length: n }, () => pick(emoteNames)).join(" ");
+    return Math.random() < 0.5 ? `${text} ${e}` : `${e} ${text}`;
+  };
+  // YouTube demo emotes: the :shortcodes: from CONFIG.YT_EMOTES (rendered as images
+  // by renderYouTube). Populate YT_EMOTES to see your member emotes in the demo.
+  const ytEmoteCodes = Object.keys(CONFIG.YT_EMOTES || {});
+  const withYtEmotes = (text) => {
+    if (!ytEmoteCodes.length || Math.random() > 0.45) return text;
+    const n = 1 + Math.floor(Math.random() * 3);
+    const e = Array.from({ length: n }, () => pick(ytEmoteCodes)).join(" ");
+    return Math.random() < 0.5 ? `${text} ${e}` : `${e} ${text}`;
+  };
 
   setInterval(() => {
     const platform = Math.random() < 0.5 ? "yt" : "tw";
+    const yt = platform === "yt";
     const name = pick(names);
     const roll = Math.random();
     addMessage({
       platform,
       name,
       color: colorFor(name),
-      html: escapeHtml(pick(lines)),
-      owner: roll > 0.95,                 // ~5% broadcaster
-      mod: roll > 0.85 && roll <= 0.95,   // ~10% mod
+      html: yt
+        ? renderYouTube(withYtEmotes(pick(lines)))
+        : demoRender(withEmotes(pick(lines))),
+      owner: roll > 0.95,                          // ~5% broadcaster
+      mod: roll > 0.85 && roll <= 0.95,            // ~10% mod
+      vip: !yt && roll > 0.78 && roll <= 0.85,     // Twitch VIP
+      sub: !yt && roll > 0.55 && roll <= 0.78,     // Twitch subscriber
+      subMonths: pick(["1", "6", "12", "24"]),
+      member: yt && roll > 0.55 && roll <= 0.85,   // YouTube member
     });
   }, 1200);
 

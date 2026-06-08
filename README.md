@@ -172,6 +172,34 @@ primary key (no harm).
 - Open the dock's console (F12) to confirm which key it picked — it logs
   `docked mode: using dock YouTube key (separate quota)`.
 
+### YouTube member / custom emotes (`YT_EMOTES`)
+
+Twitch emotes (global, sub, and channel) render as images **automatically** — Twitch
+tells the overlay exactly which emotes are in each message. YouTube does **not**: its
+API only sends the emote's text shortcode (e.g. `:_happy:`), with no image. So to show
+YouTube custom/membership emotes as images, you map each shortcode to its image URL in
+`YT_EMOTES`:
+
+```js
+YT_EMOTES : {
+  ":_happy:"  : "https://yt3.ggpht.com/.../=s48-c-k-nd",
+  ":_hype:"   : "https://yt3.ggpht.com/.../=s48-c-k-nd",
+},
+```
+
+How to find the two values:
+
+- **Shortcode** — the exact `:text:` form as it appears in chat. Easiest way: run the
+  overlay during a live stream; any emote you haven't mapped yet shows up as its raw
+  `:shortcode:` text in the feed **and** is logged in the browser console (F12) as
+  `unmapped YouTube emote shortcode: …`. Copy it verbatim, colons included.
+- **URL** — right-click the emote in your YouTube live chat → **Copy image address**.
+
+Unmapped emotes simply stay as their `:shortcode:` text (harmless). Standard unicode
+emoji (😀🔥) always work without mapping. To preview your mapped emotes without going
+live, fill in `YT_EMOTES`, set `DEMO_MODE : true`, and Refresh — they'll appear on the
+demo's YouTube rows.
+
 ### Optional — appearance & behavior
 
 | Setting | Default | Meaning |
