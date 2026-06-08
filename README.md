@@ -62,6 +62,7 @@ Notepad). Near the top, find the CONFIG block.
 | Setting | Value |
 | --- | --- |
 | `TWITCH_CHANNEL` | `"your_channel"` — your twitch channel (lowercase) |
+| `TWITCH_CHANNELS` | `[]` — optional extra Twitch channels to merge in (see below) |
 | `YT_VIDEO_ID` | `"VIDEO_ID"` — the `v=...` id from the youtube URL |
 | `YT_API_KEY` | `"YOUR_API_KEY"` — paste your YouTube Data API key |
 
@@ -70,6 +71,24 @@ Notepad). Near the top, find the CONFIG block.
   the `VIDEO_ID` part.
 - Leave `TWITCH_CHANNEL` blank (`""`) to run YouTube only, or leave the YouTube
   fields blank to run Twitch only.
+
+### Merging multiple Twitch channels
+
+To blend more than one Twitch chat into the same feed, list the extra channels in
+`TWITCH_CHANNELS` (an array). They're merged in alongside `TWITCH_CHANNEL`:
+
+```js
+TWITCH_CHANNEL  : "your_channel",
+TWITCH_CHANNELS : ["co_streamer", "another_channel"],
+```
+
+- All channels are joined over a single anonymous connection — no extra keys or
+  accounts needed, and no added quota cost.
+- Names are case-insensitive and a leading `#` is fine; duplicates are ignored.
+- Each channel's own broadcaster still gets the gold broadcaster tag, and each
+  channel's mods get the green **MOD** tag.
+- You can also run channels-only by leaving `TWITCH_CHANNEL` blank and putting
+  everything in `TWITCH_CHANNELS`.
 
 ### Optional — appearance & behavior
 

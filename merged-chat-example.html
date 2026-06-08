@@ -46,6 +46,8 @@
 /* ============================= CONFIG ============================= */
 const CONFIG = {
   TWITCH_CHANNEL : "",        // <-- your twitch channel (lowercase)
+  TWITCH_CHANNELS: [],        // <-- OPTIONAL extra channels to merge in,
+                              //     e.g. ["second_channel", "third_channel"]
   YT_VIDEO_ID    : "",        // <-- the v=... id from the youtube URL
   YT_API_KEY     : "",        // <-- paste your YouTube Data API key here
 
@@ -361,16 +363,33 @@ function renderTwitch(text, emotesTag) {
   return out;
 }
 
+// Collect every channel to join from TWITCH_CHANNEL + TWITCH_CHANNELS,
+// normalized (lowercase, no leading '#', trimmed) and de-duplicated.
+function twitchChannels() {
+  const raw = [];
+  if (CONFIG.TWITCH_CHANNEL) raw.push(CONFIG.TWITCH_CHANNEL);
+  if (Array.isArray(CONFIG.TWITCH_CHANNELS)) raw.push(...CONFIG.TWITCH_CHANNELS);
+
+  const seen = new Set(), out = [];
+  for (const c of raw) {
+    const name = String(c).trim().toLowerCase().replace(/^#/, "");
+    if (name && !seen.has(name)) { seen.add(name); out.push(name); }
+  }
+  return out;
+}
+
 function connectTwitch() {
-  if (!CONFIG.TWITCH_CHANNEL) { status("twitch", "Twitch: no channel set"); return; }
-  status("twitch", "Twitch: connecting to #" + CONFIG.TWITCH_CHANNEL + "…");
+  const channels = twitchChannels();
+  if (!channels.length) { status("twitch", "Twitch: no channel set"); return; }
+  const label = channels.map(c => "#" + c).join(" ");
+  status("twitch", "Twitch: connecting to " + label + "…");
   const ws = new WebSocket("wss://irc-ws.chat.twitch.tv:443");
 
   ws.onopen = () => {
     ws.send("CAP REQ :twitch.tv/tags twitch.tv/commands");
     ws.send("NICK justinfan" + Math.floor(Math.random() * 100000)); // anonymous
-    ws.send("JOIN #" + CONFIG.TWITCH_CHANNEL.toLowerCase());
-    status("twitch", "Twitch: connected to #" + CONFIG.TWITCH_CHANNEL);
+    for (const c of channels) ws.send("JOIN #" + c);               // one socket, many channels
+    status("twitch", "Twitch: connected to " + label);
   };
 
   ws.onmessage = (ev) => {
