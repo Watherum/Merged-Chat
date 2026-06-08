@@ -49,7 +49,21 @@ const CONFIG = {
   TWITCH_CHANNELS: [],        // <-- OPTIONAL extra channels to merge in,
                               //     e.g. ["second_channel", "third_channel"]
   YT_VIDEO_ID    : "",        // <-- the v=... id from the youtube URL
+  YT_VIDEO_IDS   : [],        // <-- OPTIONAL extra live video IDs to merge in,
+                              //     e.g. ["VIDEO_ID_2", "VIDEO_ID_3"].
+                              //     NOTE: each one uses more API quota.
   YT_API_KEY     : "",        // <-- paste your YouTube Data API key here
+
+  // OPTIONAL second YouTube API key (from a SEPARATE Google Cloud project),
+  // used ONLY when the page is opened with ?docked=true. This lets an OBS dock
+  // poll on its own 10,000/day quota instead of sharing the stream source's.
+  // Leave blank to just reuse YT_API_KEY. (Independent of ?bg=dark.)
+  YT_API_KEY_DOCK : "",
+
+  // How often to poll each YouTube chat. 0 = as fast as the API allows
+  // (default, lowest latency). Raise it to slow polling and save quota,
+  // e.g. 15000 = poll every 15s. A 2s hard floor always applies.
+  YT_MIN_POLL_MS : 0,
 
   MAX_MESSAGES   : 80,    // how many messages to keep on screen
   SHOW_BACKLOG   : false, // false = only show NEW messages after load (recommended)
@@ -228,6 +242,17 @@ document.documentElement.style.setProperty("--fade-dur", CONFIG.FADE_DURATION_SE
     document.body.style.background = CONFIG.DARK_BG_COLOR;
   }
 })();
+
+// Docked mode: opt-in via ?docked=true (or #docked) in the URL. When on, YouTube
+// uses YT_API_KEY_DOCK (if set) so a dock can draw from a separate API quota than
+// the on-stream source. Fully independent of the ?bg=dark background option.
+const IS_DOCKED = /(\?|&)docked=(true|1)\b/i.test(location.search) || location.hash === "#docked";
+const YT_KEY = (IS_DOCKED && CONFIG.YT_API_KEY_DOCK) ? CONFIG.YT_API_KEY_DOCK : CONFIG.YT_API_KEY;
+if (IS_DOCKED) {
+  console.log("[merged-chat] docked mode:",
+    CONFIG.YT_API_KEY_DOCK ? "using dock YouTube key (separate quota)" : "no dock key set — falling back to YT_API_KEY");
+}
+
 const feed = document.getElementById("feed");
 const statusEl = document.getElementById("status");
 if (!CONFIG.SHOW_STATUS) statusEl.style.display = "none";
@@ -425,40 +450,66 @@ function connectTwitch() {
 
 /* ============================= YOUTUBE ============================ */
 /* YouTube Data API v3 — needs an API key (see header comment).      */
-async function startYouTube() {
-  if (!CONFIG.YT_API_KEY) { status("youtube", "YouTube: no API key set (Twitch only)"); return; }
-  if (!CONFIG.YT_VIDEO_ID) { status("youtube", "YouTube: no video ID set"); return; }
+/* NOTE: each YouTube chat polled here uses your daily API quota, so  */
+/* merging several at once burns it proportionally faster.            */
 
-  status("youtube", "YouTube: connecting…");
+// Collect every video ID from YT_VIDEO_ID + YT_VIDEO_IDS, trimmed & de-duped.
+function youtubeVideoIds() {
+  const raw = [];
+  if (CONFIG.YT_VIDEO_ID) raw.push(CONFIG.YT_VIDEO_ID);
+  if (Array.isArray(CONFIG.YT_VIDEO_IDS)) raw.push(...CONFIG.YT_VIDEO_IDS);
+
+  const seen = new Set(), out = [];
+  for (const v of raw) {
+    const id = String(v).trim();
+    if (id && !seen.has(id)) { seen.add(id); out.push(id); }
+  }
+  return out;
+}
+
+function startYouTube() {
+  if (!YT_KEY) { status("youtube", "YouTube: no API key set (Twitch only)"); return; }
+  const ids = youtubeVideoIds();
+  if (!ids.length) { status("youtube", "YouTube: no video ID set"); return; }
+
+  // One independent connect + poll loop per video, each with its own status line.
+  ids.forEach((id, i) => {
+    const statusKey = ids.length > 1 ? "youtube" + (i + 1) : "youtube";
+    startYouTubeVideo(id, statusKey);
+  });
+}
+
+async function startYouTubeVideo(videoId, statusKey) {
+  status(statusKey, "YouTube: connecting…");
   try {
     const r = await fetch(
-      `https://www.googleapis.com/youtube/v3/videos?part=snippet,liveStreamingDetails&id=${CONFIG.YT_VIDEO_ID}&key=${CONFIG.YT_API_KEY}`
+      `https://www.googleapis.com/youtube/v3/videos?part=snippet,liveStreamingDetails&id=${videoId}&key=${YT_KEY}`
     );
     const d = await r.json();
-    if (d.error) { status("youtube", "YouTube: " + (d.error.message || "API error")); return; }
+    if (d.error) { status(statusKey, "YouTube: " + (d.error.message || "API error")); return; }
 
     const item = d.items?.[0];
     const chatId = item?.liveStreamingDetails?.activeLiveChatId;
-    if (!chatId) { status("youtube", "YouTube: no active live chat (is the stream live?)"); return; }
+    if (!chatId) { status(statusKey, "YouTube: no active live chat (is the stream live?)"); return; }
 
     const channel = item?.snippet?.channelTitle || "channel";
-    status("youtube", "YouTube: connected to " + channel);
-    pollYouTube(chatId, "", true);
+    status(statusKey, "YouTube: connected to " + channel);
+    pollYouTube(chatId, "", true, statusKey);
   } catch (e) {
-    status("youtube", "YouTube error: " + e.message);
+    status(statusKey, "YouTube error: " + e.message);
   }
 }
 
-async function pollYouTube(chatId, pageToken, first) {
+async function pollYouTube(chatId, pageToken, first, statusKey) {
   try {
     const url =
       `https://www.googleapis.com/youtube/v3/liveChat/messages` +
-      `?liveChatId=${chatId}&part=snippet,authorDetails&key=${CONFIG.YT_API_KEY}` +
+      `?liveChatId=${chatId}&part=snippet,authorDetails&key=${YT_KEY}` +
       (pageToken ? `&pageToken=${pageToken}` : "");
 
     const r = await fetch(url);
     const d = await r.json();
-    if (d.error) { status("youtube", "YouTube API: " + (d.error.message || "error")); return; }
+    if (d.error) { status(statusKey, "YouTube API: " + (d.error.message || "error")); return; }
 
     // Skip the initial backlog so we start clean (unless SHOW_BACKLOG is on)
     if (!(first && !CONFIG.SHOW_BACKLOG)) {
@@ -475,11 +526,14 @@ async function pollYouTube(chatId, pageToken, first) {
       }
     }
 
-    const wait = Math.max(d.pollingIntervalMillis || 5000, 2000);
-    setTimeout(() => pollYouTube(chatId, d.nextPageToken, false), wait);
+    // Respect the API's suggested interval, but never faster than 2s, and never
+    // faster than YT_MIN_POLL_MS if the user set one (to save quota).
+    const floor = Math.max(CONFIG.YT_MIN_POLL_MS || 0, 2000);
+    const wait = Math.max(d.pollingIntervalMillis || 5000, floor);
+    setTimeout(() => pollYouTube(chatId, d.nextPageToken, false, statusKey), wait);
   } catch (e) {
-    status("youtube", "YouTube poll error: " + e.message);
-    setTimeout(() => pollYouTube(chatId, pageToken, first), 5000);
+    status(statusKey, "YouTube poll error: " + e.message);
+    setTimeout(() => pollYouTube(chatId, pageToken, first, statusKey), 5000);
   }
 }
 

@@ -64,6 +64,7 @@ Notepad). Near the top, find the CONFIG block.
 | `TWITCH_CHANNEL` | `"your_channel"` — your twitch channel (lowercase) |
 | `TWITCH_CHANNELS` | `[]` — optional extra Twitch channels to merge in (see below) |
 | `YT_VIDEO_ID` | `"VIDEO_ID"` — the `v=...` id from the youtube URL |
+| `YT_VIDEO_IDS` | `[]` — optional extra live video IDs to merge in (see below) |
 | `YT_API_KEY` | `"YOUR_API_KEY"` — paste your YouTube Data API key |
 
 - The YouTube video ID is the part after `v=` in the watch / live_chat URL.
@@ -89,6 +90,87 @@ TWITCH_CHANNELS : ["co_streamer", "another_channel"],
   channel's mods get the green **MOD** tag.
 - You can also run channels-only by leaving `TWITCH_CHANNEL` blank and putting
   everything in `TWITCH_CHANNELS`.
+
+### Merging multiple YouTube chats
+
+Same idea for YouTube — list extra live video IDs in `YT_VIDEO_IDS` (an array).
+They're merged in alongside `YT_VIDEO_ID`:
+
+```js
+YT_VIDEO_ID  : "VIDEO_ID",
+YT_VIDEO_IDS : ["VIDEO_ID_2", "VIDEO_ID_3"],
+```
+
+- Each video gets its own connection and status line (e.g. `YouTube: connected
+  to Channel A` / `YouTube: connected to Channel B`).
+- Each stream's owner gets the broadcaster tag and each stream's mods get the
+  **MOD** tag.
+- Duplicate IDs are ignored; you can also run videos-only by leaving
+  `YT_VIDEO_ID` blank and filling `YT_VIDEO_IDS`.
+
+> **⚠️ Quota warning:** unlike Twitch (which is free), **every** YouTube chat
+> consumes your daily API quota (10,000 units). Merging two or three streams
+> burns through it 2–3× faster, and a long multi-stream session can hit
+> `quotaExceeded` (resets at midnight US Pacific). For heavy use, request a quota
+> increase or give each stream its own Google Cloud project/key.
+
+### Controlling YouTube quota usage (polling rate)
+
+YouTube quota is spent on **how often** the page polls for new messages. By
+default (`YT_MIN_POLL_MS : 0`) it polls as fast as the API allows (~2–5s) for the
+snappiest chat. If you're running close to your quota — for example because you
+load the overlay **both** as an OBS Browser source *and* as a dock (that's two
+independent pages, so ~2× the polling) — slow it down:
+
+```js
+YT_MIN_POLL_MS : 15000,   // poll every 15s instead of ~5s (~3× less quota)
+```
+
+- The value is the **minimum** milliseconds between polls. A 2-second hard floor
+  always applies, so values below 2000 behave the same as `0`.
+- Higher = less quota used, but new YouTube messages appear a few seconds later.
+  Twitch is unaffected (it's free and event-driven, not polled).
+- Rough guide: `0`/fastest ≈ ~3,600 units/hr per chat per page; `15000` cuts that
+  to roughly a third. Watch your real usage in **Google Cloud Console → APIs &
+  Services → YouTube Data API v3 → Metrics**.
+
+> **Tip:** another way to expand headroom is to give each page its own API key
+> from a *separate* Google Cloud project — each project has its own independent
+> 10,000/day quota. See the next section for how to point the dock at a second key.
+
+### Giving the dock its own API quota (`?docked=true`)
+
+If you run the overlay as **both** a stream Browser source and an OBS dock, the
+two pages each poll YouTube independently and share one quota. You can give the
+dock its **own** quota by pointing it at a second API key:
+
+1. In Google Cloud, create a **second project**, enable **YouTube Data API v3** in
+   it, and make an API key (Application restrictions = **None**, same as the
+   first). This project has its own separate 10,000/day quota.
+2. Paste that key into `YT_API_KEY_DOCK` in the CONFIG block:
+
+   ```js
+   YT_API_KEY      : "AIza...PRIMARY",     // stream source uses this
+   YT_API_KEY_DOCK : "AIza...SECONDARY",   // dock uses this instead
+   ```
+
+3. Open the **dock** with `?docked=true` in its URL:
+
+   ```
+   file:///D:/.../merged-chat.html?docked=true
+   ```
+
+When `docked=true` is present, the page uses `YT_API_KEY_DOCK` (so the dock draws
+from the second project's quota); without it, the page uses `YT_API_KEY` as
+normal. If `YT_API_KEY_DOCK` is left blank, `docked=true` simply falls back to the
+primary key (no harm).
+
+- **`?docked=true` is independent of `?bg=dark`.** One picks the API key, the
+  other only sets the background. Combine them as needed, e.g. a dark dock on its
+  own quota: `...merged-chat.html?bg=dark&docked=true`. You can also use `#docked`
+  at the end of the URL instead of the query param.
+- Open the dock's console (F12) to confirm which key it picked — it logs
+  `docked mode: using dock YouTube key (separate quota)`.
 
 ### Optional — appearance & behavior
 
@@ -229,14 +311,14 @@ it reads smaller.
 | Standard vertical overlay | 400 x 800 | 18 |
 | Big, readable "just chatting" | 480 x 900 | 22 |
 
-## Dark Background for an OBS Dock
+## Dark Background (`?bg=dark`)
 
 The overlay is transparent by design so it composites cleanly over your video as
-a Browser **source**. But if you also load it as a docked panel (Browser dock),
-OBS paints docks on **white**, which is too bright.
+a Browser **source**. But if you load it as a docked panel (Browser dock), OBS
+paints docks on **white**, which is too bright — so there's an opt-in dark
+background.
 
-To get a dark background in the **dock only**, add `?bg=dark` to the end of the
-file URL:
+To render on a dark background, add `?bg=dark` to the end of the file URL:
 
 ```
 file:///D:/.../merged-chat.html?bg=dark
@@ -244,10 +326,15 @@ file:///D:/.../merged-chat.html?bg=dark
 
 (You can also end the URL with `#dark` instead — same effect.)
 
-- **Without** the flag (your normal stream Browser source): stays fully
-  transparent. Nothing changes for the on-stream overlay.
-- **With** the flag (the dock): the page renders on a dark background (default
-  `#2a2a2e`). Change the shade via `DARK_BG_COLOR` in CONFIG.
+- **Without** the flag: stays fully transparent (your normal stream overlay).
+- **With** the flag: the page renders on a dark background (default `#2a2a2e`).
+  Change the shade via `DARK_BG_COLOR` in CONFIG.
+
+`?bg=dark` is **purely cosmetic and independent** of everything else — it's most
+useful for a dock, but you can use it anywhere you want a solid backdrop (even on
+stream). It does **not** affect which API key is used; that's the separate
+`?docked=true` flag (see [Giving the dock its own API
+quota](#giving-the-dock-its-own-api-quota-dockedtrue)).
 
 **Why not use a color-key filter to fake transparency instead?** Don't — OBS
 Browser sources already give true alpha transparency, so no key is needed on
