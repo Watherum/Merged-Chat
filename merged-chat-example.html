@@ -85,7 +85,9 @@ const CONFIG = {
                           // fade-out. Override per-URL with &retain=0 / &retain=false.
   DOCK_MAX_MESSAGES : 400,// how many messages to keep in docked mode (the scroll-back
                           // buffer) — plenty for a full stream without growing forever.
-  SHOW_BACKLOG   : false, // false = only show NEW messages after load (recommended)
+  SHOW_BACKLOG   : false, // false = only show NEW messages after load (recommended).
+                          // YouTube-only: Twitch IRC sends no history on connect,
+                          // so Twitch is always live-from-join regardless of this.
   SHOW_STATUS    : true,  // show the small connection status line (top-left)
   STATUS_HIDE_SEC : 12,   // seconds before the status box auto-hides (0 = never hide)
   FONT_SIZE_PX   : 18,    // base text size
@@ -301,9 +303,27 @@ if (IS_DOCKED) document.body.classList.add("docked");
 
 // In docked retain mode the document itself scrolls; keep it pinned to the
 // newest message unless the user has scrolled up to read history.
-const docScroller = document.scrollingElement || document.documentElement;
+// In docked mode the <body> is the actual scroll container (html stays
+// overflow:hidden), so reference it directly — document.scrollingElement points
+// at <html>, whose scrollTop never moves here, so pinning it would be a no-op.
+const docScroller = IS_DOCKED ? document.body : (document.scrollingElement || document.documentElement);
 function isPinnedToBottom() {
-  return docScroller.scrollHeight - docScroller.scrollTop - docScroller.clientHeight < 40;
+  return docScroller.scrollHeight - docScroller.scrollTop - docScroller.clientHeight < 60;
+}
+function scrollDockToBottom() { docScroller.scrollTop = docScroller.scrollHeight; }
+
+// Whether the dock is "stuck" to the bottom. Starts stuck; unsticks when the
+// user scrolls up; re-sticks the moment they scroll back down to the bottom.
+// Driven by a live scroll listener so returning to the bottom always re-arms
+// auto-follow (a per-message check could miss it if an emote image had nudged
+// the scroll position off the bottom in the meantime).
+let dockStuck = true;
+if (DOCK_RETAIN) {
+  // Bind to the scroller itself AND window: when <body> is the scroll container
+  // the scroll event fires on it, not necessarily on window.
+  const onDockScroll = () => { dockStuck = isPinnedToBottom(); };
+  docScroller.addEventListener("scroll", onDockScroll, { passive: true });
+  window.addEventListener("scroll", onDockScroll, { passive: true });
 }
 
 const feed = document.getElementById("feed");
@@ -381,24 +401,31 @@ function addMessage({ platform, name, color, html, owner, mod, vip, sub, subMont
     `<span class="name" style="color:${color}">${escapeHtml(name)}</span> ` +
     `<span class="text">${html}</span>`;
 
-  // In docked retain mode, remember whether we were at the bottom BEFORE adding
-  // this row so we can decide whether to keep following the newest message.
-  const wasPinned = DOCK_RETAIN ? isPinnedToBottom() : true;
+  // In docked mode, follow/trim only while stuck to the bottom (see dockStuck).
+  const stuck = DOCK_RETAIN ? dockStuck : true;
   const cap = DOCK_RETAIN ? CONFIG.DOCK_MAX_MESSAGES : CONFIG.MAX_MESSAGES;
 
   feed.appendChild(row);
 
-  // Trim to the cap. In docked mode only trim while the user is pinned to the
-  // bottom, so the view doesn't jump when they've scrolled up reading history;
-  // the buffer trims back down once they scroll back to the bottom.
-  if (wasPinned) {
+  // Trim to the cap. In docked mode only trim while stuck to the bottom, so the
+  // view doesn't jump when the user has scrolled up reading history; the buffer
+  // trims back down once they scroll back to the bottom.
+  if (stuck) {
     while (feed.children.length > cap) {
       feed.removeChild(feed.firstChild);
     }
   }
 
   // Follow the newest message only if the user hadn't scrolled up.
-  if (DOCK_RETAIN && wasPinned) docScroller.scrollTop = docScroller.scrollHeight;
+  if (DOCK_RETAIN && stuck) {
+    scrollDockToBottom();
+    // Emote images load AFTER layout and push the bottom down, which would leave
+    // us stranded a line or two above the newest message. Re-pin as each finishes.
+    row.querySelectorAll("img").forEach(img => {
+      if (img.complete) return;
+      img.addEventListener("load", () => { if (dockStuck) scrollDockToBottom(); }, { once: true });
+    });
+  }
 
   // Optional: fade out and remove this message after it has lived its lifetime.
   // Skipped in docked retain mode so history stays intact for scrolling back.

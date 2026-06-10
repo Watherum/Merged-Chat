@@ -240,7 +240,7 @@ demo's YouTube rows.
 | `MAX_MESSAGES` | `80` | How many lines stay on screen at once (overlay mode; docked mode uses `DOCK_MAX_MESSAGES` instead when `DOCK_RETAIN_ALL` is on). |
 | `DOCK_RETAIN_ALL` | `true` | Docked mode only: keep a long scroll-back history (`DOCK_MAX_MESSAGES`) and allow scrolling up through it, with fade-out disabled. Override per-dock with `&retain=0`. See [Keeping a long history & scrolling back](#keeping-a-long-history--scrolling-back-dock_retain_all). |
 | `DOCK_MAX_MESSAGES` | `400` | Size of the docked scroll-back buffer (how many messages are kept when `DOCK_RETAIN_ALL` is on). |
-| `SHOW_BACKLOG` | `false` | `false` = only show new messages after load (recommended). `true` = also show recent messages that already existed when it loaded. |
+| `SHOW_BACKLOG` | `false` | `false` = only show new messages after load (recommended). `true` = also show recent messages that already existed when it loaded. **YouTube only** — Twitch connects via anonymous IRC, which sends no history on join, so Twitch always starts live-from-connect regardless of this setting. |
 | `SHOW_STATUS` | `true` | Show the connection status box, top-left (set to `false` to hide it completely). |
 | `STATUS_HIDE_SEC` | `12` | Seconds the status box stays on screen before fading out. Set to `0` to keep it visible permanently (handy while testing). |
 | `FONT_SIZE_PX` | `24` | Base text size (see [Changing the Font](#changing-the-font)). |
