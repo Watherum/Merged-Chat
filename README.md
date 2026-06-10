@@ -172,6 +172,39 @@ primary key (no harm).
 - Open the dock's console (F12) to confirm which key it picked — it logs
   `docked mode: using dock YouTube key (separate quota)`.
 
+#### Keeping a long history & scrolling back (`DOCK_RETAIN_ALL`)
+
+In docked mode the dock is meant to be *read*, so by default it keeps a **long
+scroll-back history** (the last `DOCK_MAX_MESSAGES`, default **400**) and lets you
+**scroll up** through it — unlike the on-stream overlay, which only keeps the last
+`MAX_MESSAGES` lines and fades them out.
+
+This is controlled by `DOCK_RETAIN_ALL` in the CONFIG block (default `true`):
+
+```js
+DOCK_RETAIN_ALL : true,    // docked mode: long scroll-back history
+DOCK_MAX_MESSAGES : 400,   // how many messages that history holds
+```
+
+When it's on (and `?docked=true` is in the URL):
+
+- **Up to `DOCK_MAX_MESSAGES` (400) lines are kept** instead of `MAX_MESSAGES`, so
+  you can scroll back through the session. 400 is plenty for a full stream while
+  keeping memory bounded.
+- **`FADE_OUT` is ignored** so old messages don't disappear while you're reading.
+- **Stick-to-bottom:** new messages auto-follow only while you're already at the
+  bottom. Scroll up to read history and it stops jumping (and stops trimming, so
+  what you're reading doesn't get yanked); scroll back to the bottom to resume
+  auto-following and trim back down to the cap.
+
+It only affects docked mode — the normal transparent overlay is unchanged. To
+turn it off for a single dock without editing the file, add `&retain=0` (or
+`&retain=false`) to that dock's URL:
+
+```
+file:///D:/.../merged-chat.html?docked=true&retain=0
+```
+
 ### YouTube member / custom emotes (`YT_EMOTES`)
 
 Twitch emotes (global, sub, and channel) render as images **automatically** — Twitch
@@ -204,7 +237,9 @@ demo's YouTube rows.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `MAX_MESSAGES` | `80` | How many lines stay on screen at once. |
+| `MAX_MESSAGES` | `80` | How many lines stay on screen at once (overlay mode; docked mode uses `DOCK_MAX_MESSAGES` instead when `DOCK_RETAIN_ALL` is on). |
+| `DOCK_RETAIN_ALL` | `true` | Docked mode only: keep a long scroll-back history (`DOCK_MAX_MESSAGES`) and allow scrolling up through it, with fade-out disabled. Override per-dock with `&retain=0`. See [Keeping a long history & scrolling back](#keeping-a-long-history--scrolling-back-dock_retain_all). |
+| `DOCK_MAX_MESSAGES` | `400` | Size of the docked scroll-back buffer (how many messages are kept when `DOCK_RETAIN_ALL` is on). |
 | `SHOW_BACKLOG` | `false` | `false` = only show new messages after load (recommended). `true` = also show recent messages that already existed when it loaded. |
 | `SHOW_STATUS` | `true` | Show the connection status box, top-left (set to `false` to hide it completely). |
 | `STATUS_HIDE_SEC` | `12` | Seconds the status box stays on screen before fading out. Set to `0` to keep it visible permanently (handy while testing). |

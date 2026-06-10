@@ -79,7 +79,12 @@ const CONFIG = {
     // ":_happy:" : "https://yt3.googleusercontent.com/XXXX=s48-c-k-nd",
   },
 
-  MAX_MESSAGES   : 80,    // how many messages to keep on screen
+  MAX_MESSAGES   : 80,    // how many messages to keep on screen (overlay mode)
+  DOCK_RETAIN_ALL : true, // in ?docked=true mode, keep a long scroll-back history
+                          // (DOCK_MAX_MESSAGES instead of MAX_MESSAGES) and disable
+                          // fade-out. Override per-URL with &retain=0 / &retain=false.
+  DOCK_MAX_MESSAGES : 400,// how many messages to keep in docked mode (the scroll-back
+                          // buffer) — plenty for a full stream without growing forever.
   SHOW_BACKLOG   : false, // false = only show NEW messages after load (recommended)
   SHOW_STATUS    : true,  // show the small connection status line (top-left)
   STATUS_HIDE_SEC : 12,   // seconds before the status box auto-hides (0 = never hide)
@@ -245,6 +250,17 @@ const CONFIG = {
     z-index: 10;
   }
   #status.hidden { opacity: 0; }
+
+  /* Docked mode (?docked=true): let the page scroll so you can scroll up through
+     history. The feed flows in normal document flow and the document scrolls;
+     when messages are sparse they still anchor to the bottom via min-height. */
+  body.docked { overflow-y: auto; overflow-x: hidden; }
+  body.docked #feed {
+    position: static;
+    min-height: 100%;
+    max-height: none;
+  }
+  body.docked #status { position: fixed; }   /* keep status pinned while scrolling */
 </style>
 </head>
 
@@ -275,6 +291,19 @@ const YT_KEY = (IS_DOCKED && CONFIG.YT_API_KEY_DOCK) ? CONFIG.YT_API_KEY_DOCK : 
 if (IS_DOCKED) {
   console.log("[merged-chat] docked mode:",
     CONFIG.YT_API_KEY_DOCK ? "using dock YouTube key (separate quota)" : "no dock key set — falling back to YT_API_KEY");
+}
+
+// Docked retain-all: keep the full message history and let the page scroll.
+// On by default in docked mode; disable per-URL with &retain=0 / &retain=false.
+const DOCK_RETAIN = IS_DOCKED && CONFIG.DOCK_RETAIN_ALL
+  && !/(\?|&)retain=(false|0)\b/i.test(location.search);
+if (IS_DOCKED) document.body.classList.add("docked");
+
+// In docked retain mode the document itself scrolls; keep it pinned to the
+// newest message unless the user has scrolled up to read history.
+const docScroller = document.scrollingElement || document.documentElement;
+function isPinnedToBottom() {
+  return docScroller.scrollHeight - docScroller.scrollTop - docScroller.clientHeight < 40;
 }
 
 const feed = document.getElementById("feed");
@@ -352,13 +381,28 @@ function addMessage({ platform, name, color, html, owner, mod, vip, sub, subMont
     `<span class="name" style="color:${color}">${escapeHtml(name)}</span> ` +
     `<span class="text">${html}</span>`;
 
+  // In docked retain mode, remember whether we were at the bottom BEFORE adding
+  // this row so we can decide whether to keep following the newest message.
+  const wasPinned = DOCK_RETAIN ? isPinnedToBottom() : true;
+  const cap = DOCK_RETAIN ? CONFIG.DOCK_MAX_MESSAGES : CONFIG.MAX_MESSAGES;
+
   feed.appendChild(row);
-  while (feed.children.length > CONFIG.MAX_MESSAGES) {
-    feed.removeChild(feed.firstChild);
+
+  // Trim to the cap. In docked mode only trim while the user is pinned to the
+  // bottom, so the view doesn't jump when they've scrolled up reading history;
+  // the buffer trims back down once they scroll back to the bottom.
+  if (wasPinned) {
+    while (feed.children.length > cap) {
+      feed.removeChild(feed.firstChild);
+    }
   }
 
-  // Optional: fade out and remove this message after it has lived its lifetime
-  if (CONFIG.FADE_OUT) {
+  // Follow the newest message only if the user hadn't scrolled up.
+  if (DOCK_RETAIN && wasPinned) docScroller.scrollTop = docScroller.scrollHeight;
+
+  // Optional: fade out and remove this message after it has lived its lifetime.
+  // Skipped in docked retain mode so history stays intact for scrolling back.
+  if (CONFIG.FADE_OUT && !DOCK_RETAIN) {
     setTimeout(() => {
       row.classList.add("fade-out");
       setTimeout(() => row.remove(), CONFIG.FADE_DURATION_SEC * 1000);
