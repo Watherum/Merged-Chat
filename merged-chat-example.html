@@ -48,6 +48,10 @@ const CONFIG = {
   TWITCH_CHANNEL : "",        // <-- your twitch channel (lowercase)
   TWITCH_CHANNELS: [],        // <-- OPTIONAL extra channels to merge in,
                               //     e.g. ["second_channel", "third_channel"]
+  HEAD_MODS      : [],        // <-- OPTIONAL Twitch usernames (lowercase) to mark as
+                              //     "head mod": they show a war-hammer icon instead of
+                              //     the normal mod sword. e.g. ["mod_one", "mod_two"].
+                              //     Only applies to users who are already moderators.
   YT_VIDEO_ID    : "",        // <-- the v=... id from the youtube URL
   YT_VIDEO_IDS   : [],        // <-- OPTIONAL extra live video IDs to merge in,
                               //     e.g. ["VIDEO_ID_2", "VIDEO_ID_3"].
@@ -214,6 +218,7 @@ const CONFIG = {
   }
   .tag.owner  { background: #e8a200; }
   .tag.mod    { background: #00a152; }
+  .tag.hmod   { background: #00a152; }  /* head mod — same green as mod */
   .tag.vip    { background: #e005b9; }
   .tag.sub    { background: #e02d2d; gap: 2px; }  /* Twitch subscriber */
   .tag.member { background: #e02d2d; }            /* YouTube member */
@@ -229,8 +234,9 @@ const CONFIG = {
     display: block;
     fill: currentColor;   /* white glyph */
   }
-  /* Make the moderator sword bigger and give it a dark edge so it pops on green */
-  .tag.mod svg {
+  /* Make the moderator sword / head-mod hammer bigger and give it a dark edge so it pops on green */
+  .tag.mod svg,
+  .tag.hmod svg {
     width: 1.45em;
     height: 1.45em;
     filter: drop-shadow(0 0 0.5px rgba(0,0,0,.55));
@@ -375,6 +381,12 @@ const CAMERA_ICON =
 // Shield-with-check icon used for the moderator tag
 const MOD_ICON =
   `<svg viewBox="0 0 24 24" aria-label="Moderator"><path fill-rule="evenodd" d="M12 2.5 19.5 5 19.5 11.5 C19.5 16 16 19.5 12 21.5 C8 19.5 4.5 16 4.5 11.5 L4.5 5Z M10.9 16 7.2 12.3 8.7 10.8 10.9 13 15.3 8.6 16.8 10.1Z"/></svg>`;
+// Angled war-hammer icon used for the head-moderator tag (see HEAD_MODS config)
+const HEADMOD_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="Head moderator"><g transform="rotate(-40 12 12)"><rect x="4.6" y="3.2" width="14.8" height="6.4" rx="1.7"/><rect x="10.8" y="9.6" width="2.4" height="10.6" rx="1.2"/></g></svg>`;
+// Lowercased set of head-mod logins (from CONFIG.HEAD_MODS) for O(1) lookups.
+const HEAD_MOD_SET =
+  new Set((CONFIG.HEAD_MODS || []).map(s => String(s).trim().toLowerCase()).filter(Boolean));
 // Gem icon used for the VIP tag
 const VIP_ICON =
   `<svg viewBox="0 0 24 24" aria-label="VIP"><path d="M6 3h12l4 6-10 12L2 9zm.84 2L4.3 8.5h4.2zm10.32 0L15.5 8.5h4.2zM12 5.4 9.7 8.5h4.6zM4.9 10.5l5.1 6.7-2.8-6.7zm6.2 0L12 17l.9-6.5zm4.9 0-2.3 6.7 5.1-6.7z"/></svg>`;
@@ -382,12 +394,13 @@ const VIP_ICON =
 const STAR_ICON =
   `<svg viewBox="0 0 24 24" aria-label="Subscriber"><path d="M12 3 14.116 9.088 20.56 9.219 15.424 13.112 17.29 19.281 12 15.6 6.71 19.281 8.576 13.112 3.44 9.219 9.884 9.088Z"/></svg>`;
 
-function addMessage({ platform, name, color, html, owner, mod, vip, sub, subMonths, member }) {
+function addMessage({ platform, name, color, html, owner, headMod, mod, vip, sub, subMonths, member }) {
   const row = document.createElement("div");
   row.className = "msg " + platform;
 
   let tagHtml = "";
   if (owner) tagHtml += `<span class="tag owner">${CAMERA_ICON}</span>`;
+  else if (headMod) tagHtml += `<span class="tag hmod">${HEADMOD_ICON}</span>`;
   else if (mod) tagHtml += `<span class="tag mod">${MOD_ICON}</span>`;
   else if (vip) tagHtml += `<span class="tag vip">${VIP_ICON}</span>`;
   else if (sub) tagHtml += `<span class="tag sub">${STAR_ICON}${subMonths ? `<span class="mo">${subMonths}</span>` : ""}</span>`;
@@ -571,6 +584,8 @@ function connectTwitch() {
         ? (/(?:subscriber|founder)\/(\d+)/.exec(badgeInfo) ||
            /(?:subscriber|founder)\/(\d+)/.exec(badges))
         : null;
+      const isMod = badges.includes("moderator");
+      const isHeadMod = isMod && HEAD_MOD_SET.has(nick.toLowerCase());
 
       addMessage({
         platform: "tw",
@@ -578,7 +593,8 @@ function connectTwitch() {
         color,
         html: renderTwitch(m.text, m.tags["emotes"]),
         owner: badges.includes("broadcaster"),
-        mod: badges.includes("moderator"),
+        headMod: isHeadMod,
+        mod: isMod,
         vip: badges.includes("vip"),
         sub: isSub,
         subMonths: subMatch ? subMatch[1] : "",
@@ -761,7 +777,8 @@ async function startDemo() {
         ? renderYouTube(withYtEmotes(pick(lines)))
         : demoRender(withEmotes(pick(lines))),
       owner: roll > 0.95,                          // ~5% broadcaster
-      mod: roll > 0.85 && roll <= 0.95,            // ~10% mod
+      headMod: !yt && roll > 0.92 && roll <= 0.95, // ~3% Twitch head mod (war hammer)
+      mod: roll > 0.85 && roll <= 0.92,            // ~7% mod
       vip: !yt && roll > 0.78 && roll <= 0.85,     // Twitch VIP
       sub: !yt && roll > 0.55 && roll <= 0.78,     // Twitch subscriber
       subMonths: pick(["1", "6", "12", "24"]),
