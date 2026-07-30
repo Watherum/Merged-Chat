@@ -1,0 +1,7 @@
+# Python packages the Merged Chat relay needs.
+#   install:  install-requirements.bat      (or: py -m pip install -r requirements.txt)
+
+# WebSocket client + server. The relay uses it for the Twitch IRC connection,
+# the Twitch EventSub connection, and its own local server that feeds the pages.
+# v10 introduced the asyncio API relay.py prefers; it falls back on older ones.
+websockets>=10.0

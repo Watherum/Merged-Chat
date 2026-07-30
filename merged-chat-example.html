@@ -39,11 +39,43 @@
        * The YouTube stream must be LIVE for messages to come through.
        * Data API has a daily quota (10,000 units). Polling one chat is
          fine for normal stream lengths; very long streams may exhaust it.
-       * Twitch needs nothing — it connects anonymously.
+       * Twitch chat needs nothing — it connects anonymously.
+       * Channel point redeems DO need a one-time token setup — see below.
+
+     ---- HOW TO SHOW TWITCH ALERTS & CHANNEL POINT REDEEMS (optional) -----
+       Channel points, subs, resubs, gift subs, cheers, follows, raids and
+       hype trains don't come over chat, so this uses Twitch EventSub with a
+       token for YOUR broadcaster account. It AUTO-REFRESHES, so once set up
+       it won't expire mid-stream. You only see events for the channel that
+       owns the token. The ?setup flow grants every scope these need, so if
+       you already set up redeems, just run ?setup once more. One-time setup:
+         1. Register an app at https://dev.twitch.tv/console/apps -> Register.
+              - OAuth Redirect URL: exactly  http://localhost
+              - Category: anything.
+            Copy the Client ID, and click "New Secret" to make a Client Secret.
+         2. Put both into TWITCH_CLIENT_ID and TWITCH_CLIENT_SECRET below; save.
+         3. Open this file in a normal browser with ?setup on the end, e.g.
+              file:///D:/.../merged-chat.html?setup
+            Follow the two on-screen steps; it hands you a REFRESH TOKEN.
+         4. Paste that into TWITCH_REFRESH_TOKEN below, save, refresh the OBS
+            source. That's it — it keeps itself authorized from now on.
+       (Your Client Secret + refresh token live only in this local file, which
+        is gitignored, so they aren't shared — same as the API keys above.)
      ====================================================================== -->
 
 <script>
-/* ============================= CONFIG ============================= */
+/* ============================= CONFIG =============================
+   FALLBACK DEFAULTS ONLY.
+
+   When relay.py is running — the normal setup — it sends these settings from
+   app.properties as soon as a page connects, and they replace whatever is
+   here. app.properties is the one file to edit.
+
+   What's below is what a page uses when NO relay is running: appearance
+   defaults, plus connection details so the overlay still works standalone.
+   RELAY_URL / RELAY_PORT_TRIES are the exception — they're how a page finds
+   the relay in the first place, so they can only live here.
+   ================================================================= */
 const CONFIG = {
   TWITCH_CHANNEL : "",        // <-- your twitch channel (lowercase)
   TWITCH_CHANNELS: [],        // <-- OPTIONAL extra channels to merge in,
@@ -58,16 +90,31 @@ const CONFIG = {
                               //     NOTE: each one uses more API quota.
   YT_API_KEY     : "",        // <-- paste your YouTube Data API key here
 
-  // OPTIONAL second YouTube API key (from a SEPARATE Google Cloud project),
-  // used ONLY when the page is opened with ?docked=true. This lets an OBS dock
-  // poll on its own 10,000/day quota instead of sharing the stream source's.
-  // Leave blank to just reuse YT_API_KEY. (Independent of ?bg=dark.)
-  YT_API_KEY_DOCK : "",
+  // OPTIONAL backup YouTube API key(s), from SEPARATE Google Cloud projects
+  // (quota is per project, so each one brings its own 10,000/day). When the
+  // primary key runs out of quota mid-stream, polling switches to the next key
+  // instead of stopping for the day. Give one key or a list:
+  //   YT_API_KEY_BACKUP : "AIza...SECOND",
+  //   YT_API_KEY_BACKUP : ["AIza...SECOND", "AIza...THIRD"],
+  // Leave blank for no backup.
+  YT_API_KEY_BACKUP : "",
 
-  // How often to poll each YouTube chat. 0 = as fast as the API allows
-  // (default, lowest latency). Raise it to slow polling and save quota,
-  // e.g. 15000 = poll every 15s. A 2s hard floor always applies.
-  YT_MIN_POLL_MS : 0,
+  // How often to poll each YouTube chat, in milliseconds. Each poll costs 5
+  // quota units, so 10,000/day = 2,000 polls total across every YouTube source
+  // on this key. 15000 (every 15s) = ~1,200 units/hr per chat, about 8 hours of
+  // stream. Lower it for snappier chat at the cost of runtime: 0 polls as fast
+  // as the API allows (~5s) and burns the whole quota in under 3 hours.
+  // Polling slower never loses messages — each poll returns everything since
+  // the last one — it just delays them. A 2s hard floor always applies.
+  YT_MIN_POLL_MS : 15000,
+
+  // Safety net for a failing YouTube connection. A dead stream, an expired key
+  // or a dropped network used to retry every 5s forever in the background; now
+  // retries back off exponentially and stop after this many consecutive
+  // failures (0 = never give up). Fatal errors — quota gone, bad key, chat
+  // ended — stop immediately regardless, since retrying can't fix them.
+  YT_MAX_RETRIES    : 6,
+  YT_BACKOFF_MAX_MS : 300000,   // ceiling on the backoff between retries (5 min)
 
   // YouTube custom / membership emotes: ":shortcode:" -> image URL. YouTube's API
   // only sends the shortcode text (no image), so map them here to render images.
@@ -83,6 +130,43 @@ const CONFIG = {
     // ":_happy:" : "https://yt3.googleusercontent.com/XXXX=s48-c-k-nd",
   },
 
+  // ---- Twitch alerts & channel point redeems (optional) — see header ----
+  // Shows channel points AND subs / resubs / gift subs / cheers / follows /
+  // raids / hype trains in the feed. Uses Twitch EventSub with a broadcaster
+  // token that AUTO-REFRESHES (won't die mid-stream). Get it once via ?setup.
+  // Only the channel that owns the token is read. Adding alerts needs extra
+  // scopes, so if you set up redeems earlier, run ?setup once more to re-grant.
+  SHOW_REDEEMS        : true, // false = ignore channel points entirely
+  SHOW_ALERTS         : {     // Twitch alerts to show (needs one re-?setup for scopes)
+    follows   : true,
+    subs      : true,         // new subs + resubs (with message)
+    giftSubs  : true,
+    cheers    : true,         // bits
+    raids     : true,
+    hypeTrain : true,
+  },
+  TWITCH_CLIENT_ID    : "",   // Twitch app Client ID (dev.twitch.tv/console/apps)
+  TWITCH_CLIENT_SECRET: "",   // Twitch app Client Secret (stays in this local file)
+  TWITCH_REFRESH_TOKEN: "",   // long-lived refresh token from the ?setup flow
+
+  // OPTIONAL second Twitch app, used ONLY when the page is opened with
+  // ?docked=true. Twitch rejects a duplicate EventSub subscription (same app +
+  // event type + channel) with 409, so an OBS dock sharing the app above gets
+  // "Alerts: nothing subscribed" while the stream source keeps them. Registering
+  // a SECOND app at dev.twitch.tv/console/apps (Redirect URL http://localhost)
+  // gives the dock its own subscriptions. Setup:
+  //   1. paste the new app's Client ID + Secret below,
+  //   2. open this file with ?setup&docked=true and run the two steps,
+  //   3. paste the token it prints into TWITCH_REFRESH_TOKEN_DOCK.
+  // Leave all three blank to just reuse the app above (alerts then work in
+  // whichever page connects first). NOTE: when relay.py is running it holds the
+  // ONE EventSub session and feeds every page, so these are not needed at all.
+  // Independent of ?bg=dark.
+  TWITCH_CLIENT_ID_DOCK    : "",
+  TWITCH_CLIENT_SECRET_DOCK: "",
+  TWITCH_REFRESH_TOKEN_DOCK: "",
+
+  // --- appearance: overridden by app.properties when the relay is running ---
   MAX_MESSAGES   : 80,    // how many messages to keep on screen (overlay mode)
   DOCK_RETAIN_ALL : true, // in ?docked=true mode, keep a long scroll-back history
                           // (DOCK_MAX_MESSAGES instead of MAX_MESSAGES) and disable
@@ -100,8 +184,11 @@ const CONFIG = {
   MESSAGE_LIFE_SEC : 30,  // seconds a message stays before it starts fading (FADE_OUT only)
   FADE_DURATION_SEC: 1,   // how long the fade-out animation takes
 
-  DEMO_MODE      : false, // true = show fake test messages (no stream/keys needed).
-                          // Set back to false before going live!
+  RELAY_URL      : "ws://127.0.0.1:8777",
+  // If that port was busy the relay moves up to the next free one; the page
+  // scans this many ports from RELAY_URL so it still finds it. Keep in step
+  // with relay.port.attempts in app.properties.
+  RELAY_PORT_TRIES : 10,
 
   // Dock background: the stream Browser SOURCE stays transparent (true alpha).
   // To get a dark background in an OBS *docked* view, add ?bg=dark to the URL,
@@ -242,6 +329,54 @@ const CONFIG = {
     filter: drop-shadow(0 0 0.5px rgba(0,0,0,.55));
   }
 
+  /* Channel point redeem rows — purple-tinted so they stand out from chat */
+  .msg.redeem {
+    background: rgba(145, 71, 255, 0.28);
+    border-left: 3px solid #9147ff;
+    border-radius: 4px;
+    padding: 2px 6px;
+  }
+  .msg.redeem .name::after { content: ""; }   /* no trailing colon: "name redeemed X" */
+  .tag.redeem { background: #9147ff; }
+  .msg.redeem b { font-weight: 700; }
+  .redeem-cost {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    font-weight: 700;
+    margin-left: 6px;
+    white-space: nowrap;
+  }
+  .redeem-cost svg {
+    width: 0.95em;
+    height: 0.95em;
+    fill: currentColor;
+    vertical-align: middle;
+  }
+
+  /* Sub / cheer / follow / raid / hype-train alert rows (colour by kind) */
+  .msg.alert {
+    background: rgba(255, 255, 255, 0.06);
+    border-left: 3px solid #888;
+    border-radius: 4px;
+    padding: 2px 6px;
+  }
+  .msg.alert .name::after { content: ""; }   /* no trailing colon */
+  .msg.alert b { font-weight: 700; }
+  .tag.alert { color: #fff; }
+  .msg.alert.follow { border-left-color: #1f8fff; }
+  .tag.alert.follow { background: #1f8fff; }
+  .msg.alert.sub    { border-left-color: #e02d2d; }
+  .tag.alert.sub    { background: #e02d2d; }
+  .msg.alert.gift   { border-left-color: #e005b9; }
+  .tag.alert.gift   { background: #e005b9; }
+  .msg.alert.cheer  { border-left-color: #772ce8; }
+  .tag.alert.cheer  { background: #772ce8; }
+  .msg.alert.raid   { border-left-color: #e8a200; }
+  .tag.alert.raid   { background: #e8a200; }
+  .msg.alert.hype   { border-left-color: #ff5a36; }
+  .tag.alert.hype   { background: #ff5a36; }
+
   #status {
     position: absolute;
     top: 6px;
@@ -278,33 +413,77 @@ const CONFIG = {
 
 <script>
 /* ----------------------------- setup ----------------------------- */
-document.documentElement.style.setProperty("--fs", CONFIG.FONT_SIZE_PX + "px");
-document.documentElement.style.setProperty("--fade-dur", CONFIG.FADE_DURATION_SEC + "s");
+// Everything CONFIG drives that isn't re-read on every message. Called once at
+// startup with the defaults below, and again when the relay sends the values
+// from app.properties — so appearance can be changed in one place without
+// editing this file.
+function applyVisualConfig() {
+  document.documentElement.style.setProperty("--fs", CONFIG.FONT_SIZE_PX + "px");
+  document.documentElement.style.setProperty("--fade-dur", CONFIG.FADE_DURATION_SEC + "s");
 
-// Dark background for OBS docks: opt-in via ?bg=dark (or #dark) in the URL.
-// Stream Browser sources omit this, so they keep a transparent (alpha) background.
-(function applyBackground() {
+  // Dark background for OBS docks: opt-in via ?bg=dark (or #dark) in the URL.
+  // Stream Browser sources omit it, so they keep a transparent (alpha) background.
   const wantsDark = /(\?|&)bg=dark\b/.test(location.search) || location.hash === "#dark";
   if (wantsDark) {
     document.documentElement.style.background = CONFIG.DARK_BG_COLOR;
     document.body.style.background = CONFIG.DARK_BG_COLOR;
   }
-})();
 
-// Docked mode: opt-in via ?docked=true (or #docked) in the URL. When on, YouTube
-// uses YT_API_KEY_DOCK (if set) so a dock can draw from a separate API quota than
-// the on-stream source. Fully independent of the ?bg=dark background option.
+  // Recomputed rather than fixed at load, so a relay config change takes effect.
+  DOCK_RETAIN = IS_DOCKED && !!CONFIG.DOCK_RETAIN_ALL
+    && !/(\?|&)retain=(false|0)\b/i.test(location.search);
+  HEAD_MOD_SET = new Set((CONFIG.HEAD_MODS || [])
+    .map(x => String(x).trim().toLowerCase()).filter(Boolean));
+
+  if (typeof statusEl !== "undefined" && statusEl)
+    statusEl.style.display = CONFIG.SHOW_STATUS ? "" : "none";
+}
+
+// Docked mode: opt-in via ?docked=true (or #docked) in the URL. Turns on the
+// long scroll-back history (see DOCK_RETAIN_ALL). Fully independent of the
+// ?bg=dark background option.
 const IS_DOCKED = /(\?|&)docked=(true|1)\b/i.test(location.search) || location.hash === "#docked";
-const YT_KEY = (IS_DOCKED && CONFIG.YT_API_KEY_DOCK) ? CONFIG.YT_API_KEY_DOCK : CONFIG.YT_API_KEY;
+// ?setup (or #setup): show the one-time channel-point token setup page instead of chat.
+const IS_SETUP = /(\?|&)setup\b/i.test(location.search) || location.hash === "#setup";
+
+// YouTube keys in the order they'll be used: the primary first, then any
+// backups. Quota is per Google Cloud project, so a key from a second project
+// carries its own 10,000/day; when one drains mid-stream the polling loops move
+// to the next instead of stopping for the day (see ytRotateKey).
+// YT_API_KEY_DOCK is the old name for the second key — still honoured so an
+// existing config keeps working, since it's now just another backup.
+const YT_KEYS = [CONFIG.YT_API_KEY]
+  .concat(CONFIG.YT_API_KEY_BACKUP || [], CONFIG.YT_API_KEY_DOCK || [])
+  .map(k => (typeof k === "string" ? k : "").trim())
+  .filter((k, i, all) => k && all.indexOf(k) === i);   // drop blanks + duplicates
+let ytKeyIndex = 0;
+function ytKey() { return YT_KEYS[ytKeyIndex] || ""; }
+
+// Same idea for the Twitch alerts app: a dock with its own app gets its own
+// EventSub subscriptions, instead of colliding with the stream source's (Twitch
+// answers a duplicate type+channel on one app with 409). Falls back to the main
+// app when the dock trio is blank. All three must be set to count as a dock app.
+const TW_DOCK_APP = IS_DOCKED
+  && (CONFIG.TWITCH_CLIENT_ID_DOCK || "").trim()
+  && (CONFIG.TWITCH_CLIENT_SECRET_DOCK || "").trim()
+  && (CONFIG.TWITCH_REFRESH_TOKEN_DOCK || "").trim();
+const TW_CLIENT_ID = ((TW_DOCK_APP ? CONFIG.TWITCH_CLIENT_ID_DOCK : CONFIG.TWITCH_CLIENT_ID) || "").trim();
+const TW_SECRET    = ((TW_DOCK_APP ? CONFIG.TWITCH_CLIENT_SECRET_DOCK : CONFIG.TWITCH_CLIENT_SECRET) || "").trim();
+const TW_REFRESH   = ((TW_DOCK_APP ? CONFIG.TWITCH_REFRESH_TOKEN_DOCK : CONFIG.TWITCH_REFRESH_TOKEN) || "").trim();
+
+console.log("[merged-chat] YouTube keys:", YT_KEYS.length,
+  YT_KEYS.length > 1 ? "(1 primary + " + (YT_KEYS.length - 1) + " backup)" : "");
 if (IS_DOCKED) {
   console.log("[merged-chat] docked mode:",
-    CONFIG.YT_API_KEY_DOCK ? "using dock YouTube key (separate quota)" : "no dock key set — falling back to YT_API_KEY");
+    TW_DOCK_APP ? "using dock Twitch app (own alert subscriptions)" : "sharing the main Twitch app's alerts");
 }
 
 // Docked retain-all: keep the full message history and let the page scroll.
 // On by default in docked mode; disable per-URL with &retain=0 / &retain=false.
-const DOCK_RETAIN = IS_DOCKED && CONFIG.DOCK_RETAIN_ALL
-  && !/(\?|&)retain=(false|0)\b/i.test(location.search);
+// Both of these are computed by applyVisualConfig(), so the relay can change
+// them at runtime. Declared here only because that runs before their old homes.
+let DOCK_RETAIN = false;
+let HEAD_MOD_SET = new Set();
 if (IS_DOCKED) document.body.classList.add("docked");
 
 // In docked retain mode the document itself scrolls; keep it pinned to the
@@ -324,7 +503,9 @@ function scrollDockToBottom() { docScroller.scrollTop = docScroller.scrollHeight
 // auto-follow (a per-message check could miss it if an emote image had nudged
 // the scroll position off the bottom in the meantime).
 let dockStuck = true;
-if (DOCK_RETAIN) {
+if (IS_DOCKED) {
+  // Bound whenever this is a dock, not only when DOCK_RETAIN is on at load —
+  // the relay can turn retain on later, and re-binding then would be missed.
   // Bind to the scroller itself AND window: when <body> is the scroll container
   // the scroll event fires on it, not necessarily on window.
   const onDockScroll = () => { dockStuck = isPinnedToBottom(); };
@@ -334,12 +515,24 @@ if (DOCK_RETAIN) {
 
 const feed = document.getElementById("feed");
 const statusEl = document.getElementById("status");
-if (!CONFIG.SHOW_STATUS) statusEl.style.display = "none";
+applyVisualConfig();          // now that statusEl exists, apply the defaults
 
 // One status line per source (twitch / youtube / demo), each on its own row.
 const statusLines = {};
 let statusTimer = null;
-function status(key, msg) {
+// Sources that have connected successfully at least once. Their later
+// reconnect/retry chatter updates the text in place instead of popping the
+// box back open mid-stream (see reconnectStatus below).
+const statusConnected = {};
+// Set once the box has auto-hidden, i.e. startup is over. After that, no
+// connect/retry chatter is allowed to pop it open again (see reconnectStatus).
+let statusSettled = false;
+
+// `quiet` = update the line, but don't un-hide the box or restart the
+// auto-hide timer. Repeating the same message is always a no-op, so a poll or
+// retry loop saying the same thing can't make the box flash again.
+function status(key, msg, quiet) {
+  if (statusLines[key] === msg) return;
   console.log("[merged-chat]", key + ":", msg);
   statusLines[key] = msg;
   if (!CONFIG.SHOW_STATUS) return;
@@ -347,11 +540,24 @@ function status(key, msg) {
     .filter(Boolean)
     .map(escapeHtml)
     .join("<br>");
+  if (quiet) return;
   statusEl.classList.remove("hidden");
   clearTimeout(statusTimer);
   if (CONFIG.STATUS_HIDE_SEC > 0) {
-    statusTimer = setTimeout(() => statusEl.classList.add("hidden"), CONFIG.STATUS_HIDE_SEC * 1000);
+    statusTimer = setTimeout(() => {
+      statusEl.classList.add("hidden");
+      statusSettled = true;
+    }, CONFIG.STATUS_HIDE_SEC * 1000);
   }
+}
+
+// Status coming from a connect/reconnect/retry path. Shows normally during
+// startup, while the box is still up; after the box has auto-hidden (or once
+// the source has connected) it's routine churn, so it only updates the text
+// quietly. Without this, a source stuck in a retry loop — its message flipping
+// between "connecting…" and "retrying in Ns…" — re-opens the box forever.
+function reconnectStatus(key, msg) {
+  status(key, msg, statusSettled || statusConnected[key] === true);
 }
 
 function escapeHtml(s) {
@@ -384,15 +590,28 @@ const MOD_ICON =
 // Angled war-hammer icon used for the head-moderator tag (see HEAD_MODS config)
 const HEADMOD_ICON =
   `<svg viewBox="0 0 24 24" aria-label="Head moderator"><g transform="rotate(-40 12 12)"><rect x="4.6" y="3.2" width="14.8" height="6.4" rx="1.7"/><rect x="10.8" y="9.6" width="2.4" height="10.6" rx="1.2"/></g></svg>`;
-// Lowercased set of head-mod logins (from CONFIG.HEAD_MODS) for O(1) lookups.
-const HEAD_MOD_SET =
-  new Set((CONFIG.HEAD_MODS || []).map(s => String(s).trim().toLowerCase()).filter(Boolean));
+// HEAD_MOD_SET — lowercased head-mod logins, for O(1) lookups — is declared and
+// filled by applyVisualConfig() above, so it updates when the relay sends config.
 // Gem icon used for the VIP tag
 const VIP_ICON =
   `<svg viewBox="0 0 24 24" aria-label="VIP"><path d="M6 3h12l4 6-10 12L2 9zm.84 2L4.3 8.5h4.2zm10.32 0L15.5 8.5h4.2zM12 5.4 9.7 8.5h4.6zM4.9 10.5l5.1 6.7-2.8-6.7zm6.2 0L12 17l.9-6.5zm4.9 0-2.3 6.7 5.1-6.7z"/></svg>`;
 // Star icon shared by Twitch subscribers and YouTube members
 const STAR_ICON =
   `<svg viewBox="0 0 24 24" aria-label="Subscriber"><path d="M12 3 14.116 9.088 20.56 9.219 15.424 13.112 17.29 19.281 12 15.6 6.71 19.281 8.576 13.112 3.44 9.219 9.884 9.088Z"/></svg>`;
+// Channel-points token (ring) used for redeem rows and their cost
+const POINTS_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="Channel Points"><path fill-rule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 5.5A4.5 4.5 0 1 0 12 16.5 4.5 4.5 0 0 0 12 7.5z"/></svg>`;
+// Alert icons: follow (heart), gift sub (box), cheer (gem), raid (crowd), hype (bolt)
+const HEART_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="Follow"><path d="M12 21C7 17.5 3 14 3 9.5 3 6.9 5 5 7.5 5c1.6 0 3 .8 3.8 2.1C12.1 5.8 13.5 5 15.1 5 17.6 5 19.6 6.9 19.6 9.5c0 4.5-4 8-9 11.5z"/></svg>`;
+const GIFT_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="Gift sub"><path d="M4 12h7v9H5a1 1 0 0 1-1-1zm9 9v-9h7v8a1 1 0 0 1-1 1zM13 11V7h7v3a1 1 0 0 1-1 1zM4 11a1 1 0 0 1-1-1V7h8v4zm4.5-5A1.5 1.5 0 1 1 10 4.5c0 .5-.2 1-.4 1.5zm5.9 0c-.2-.5-.4-1-.4-1.5A1.5 1.5 0 1 1 15.5 6z"/></svg>`;
+const BITS_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="Bits"><path d="M12 2 21 12 12 22 3 12z"/></svg>`;
+const RAID_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="Raid"><path d="M12 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm-6.5 1a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zm13 0a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM12 13c-2.7 0-5 1.5-5 3.5V19h10v-2.5c0-2-2.3-3.5-5-3.5zm-6.5.6C3.7 13.6 2 14.8 2 16.5V19h3.5v-2.5c0-.9.3-1.7.8-2.4a4 4 0 0 0-.8-.5zm13 0c-.3.1-.6.3-.8.5.5.7.8 1.5.8 2.4V19H22v-2.5c0-1.7-1.7-2.9-3.5-2.9z"/></svg>`;
+const HYPE_ICON =
+  `<svg viewBox="0 0 24 24" aria-label="Hype Train"><path d="M13 2 3 14h7l-1 8 11-13h-8z"/></svg>`;
 
 function addMessage({ platform, name, color, html, owner, headMod, mod, vip, sub, subMonths, member }) {
   const row = document.createElement("div");
@@ -414,6 +633,12 @@ function addMessage({ platform, name, color, html, owner, headMod, mod, vip, sub
     `<span class="name" style="color:${color}">${escapeHtml(name)}</span> ` +
     `<span class="text">${html}</span>`;
 
+  placeRow(row);
+}
+
+// Append a finished row, then trim to the cap, auto-scroll (docked mode) and
+// schedule its fade-out. Shared by chat messages and channel-point redeem rows.
+function placeRow(row) {
   // In docked mode, follow/trim only while stuck to the bottom (see dockStuck).
   const stuck = DOCK_RETAIN ? dockStuck : true;
   const cap = DOCK_RETAIN ? CONFIG.DOCK_MAX_MESSAGES : CONFIG.MAX_MESSAGES;
@@ -447,6 +672,173 @@ function addMessage({ platform, name, color, html, owner, headMod, mod, vip, sub
       row.classList.add("fade-out");
       setTimeout(() => row.remove(), CONFIG.FADE_DURATION_SEC * 1000);
     }, CONFIG.MESSAGE_LIFE_SEC * 1000);
+  }
+}
+
+/* =========================== RELAY CLIENT ========================= */
+/* One local process (relay.py) does all the network I/O and re-broadcasts
+   it to every open page, so an OBS Browser source and an OBS dock show
+   byte-identical chat off a single YouTube quota and a single EventSub
+   session.
+
+   This replaced an in-browser localStorage bus. That approach looked sound
+   — two file:// pages in OBS DO share a localStorage area — but measurement
+   showed OBS never propagates a write from a Browser source to a dock while
+   both are running. Each page only ever saw a frozen snapshot, so neither
+   could see the other's lease, both elected themselves leader, and both ran
+   their own feed. Hence the move out of the browser entirely.
+
+   What crosses the wire is the RAW payload each page would have fetched
+   itself (an IRC line, a liveChat item, an EventSub event), so all parsing,
+   badge logic and emote rendering stays here and every view renders it the
+   same way.
+
+   If the relay isn't running, the page falls back to connecting directly,
+   exactly as it did before — so the file still works on its own.          */
+
+// Where the relay is. Normally CONFIG.RELAY_URL, but if this page arrived over
+// http(s) it was served BY the relay — to a phone, tablet or second PC — so
+// talk back to wherever we came from. On that device "127.0.0.1" would mean the
+// device itself, which is nothing.
+const RELAY_SERVED = /^https?:$/i.test(location.protocol) && !!location.host;
+const RELAY_URL = RELAY_SERVED
+  ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host
+  : (CONFIG.RELAY_URL || "").trim();
+// The relay walks its port upward when the configured one is taken, so scan the
+// same range here rather than making you edit two files when that happens.
+// No need when the relay served us — we already know exactly where it is.
+const RELAY_PORT_TRIES = RELAY_SERVED ? 1 : Math.max(CONFIG.RELAY_PORT_TRIES | 0, 1);
+let relaySocket = null;
+let relayEverConnected = false;
+let relayPortOffset = 0;        // the offset that worked, reused on reconnect
+
+function relayHistoryWanted() {
+  // Only a dock wants scroll-back; a refreshed overlay should come back clean
+  // rather than dumping old lines back on stream.
+  return DOCK_RETAIN ? (CONFIG.DOCK_MAX_MESSAGES | 0) : 0;
+}
+
+// RELAY_URL with its port shifted up by `offset`.
+function relayUrlFor(offset) {
+  const m = /^(wss?:\/\/[^/:]+):(\d+)(.*)$/i.exec(RELAY_URL);
+  if (!m) return RELAY_URL;     // no explicit port: use it exactly as given
+  return m[1] + ":" + (parseInt(m[2], 10) + offset) + m[3];
+}
+
+// Try the relay. `onFallback` runs only after every port in the range has
+// failed, so the page connects directly instead of showing nothing.
+function connectRelay(onFallback, offset) {
+  offset = offset || 0;
+  const base = relayUrlFor(offset);
+  const url = base + (base.includes("?") ? "&" : "?")
+            + "history=" + relayHistoryWanted();
+  let settled = false;
+
+  const tryNext = () => {
+    if (offset + 1 < RELAY_PORT_TRIES) { connectRelay(onFallback, offset + 1); return true; }
+    return false;
+  };
+
+  let ws;
+  try {
+    ws = new WebSocket(url);
+  } catch (e) {
+    if (!tryNext() && onFallback) onFallback();
+    return;
+  }
+  relaySocket = ws;
+
+  ws.onopen = () => {
+    settled = true;
+    relayEverConnected = true;
+    relayPortOffset = offset;   // remember it so reconnects skip the scan
+    console.log("[merged-chat] relay: connected to " + base);
+    status("relay", "");        // clear any "connecting"/"lost" line
+  };
+
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    relayHandle(msg);
+  };
+
+  ws.onclose = () => {
+    relaySocket = null;
+    if (!settled && !relayEverConnected) {
+      // Nothing on this port. Walk up the range before giving up — the relay
+      // may have moved because the configured port was taken.
+      if (tryNext()) return;
+      console.log("[merged-chat] relay: not reachable on " + relayUrlFor(0) +
+                  " (+" + (RELAY_PORT_TRIES - 1) + " ports), falling back to direct mode");
+      if (onFallback) onFallback();
+      return;
+    }
+    // We had it and lost it: keep trying, don't start a second direct feed
+    // alongside the relay's (that's how you get two different chats).
+    status("relay", "Relay: lost connection, reconnecting…");
+    setTimeout(() => connectRelay(null, relayPortOffset), 3000);
+  };
+
+  ws.onerror = () => { try { ws.close(); } catch (e) {} };
+}
+
+// Adopt the appearance settings the relay read out of app.properties. That file
+// is the single place to change how chat looks once you're running the relay;
+// the CONFIG block above is only what a page falls back to without one.
+// Unknown or missing keys are left at their defaults, so an older app.properties
+// keeps working.
+function applyRelayConfig(cfg) {
+  if (!cfg || typeof cfg !== "object") return;
+  let changed = 0;
+  for (const k in cfg) {
+    if (cfg[k] === null || cfg[k] === undefined) continue;
+    CONFIG[k] = cfg[k];
+    changed++;
+  }
+  if (!changed) return;
+  applyVisualConfig();
+  console.log("[merged-chat] relay: applied " + changed + " settings from app.properties");
+}
+
+// Adopt the appearance settings the relay read out of app.properties. That file
+// is the single place to change how chat looks once you're running the relay;
+// the CONFIG block above is only what a page falls back to without one.
+// Unknown or missing keys are left at their defaults, so an older app.properties
+// keeps working.
+function applyRelayConfig(cfg) {
+  if (!cfg || typeof cfg !== "object") return;
+  let changed = 0;
+  for (const k in cfg) {
+    if (cfg[k] === null || cfg[k] === undefined) continue;
+    CONFIG[k] = cfg[k];
+    changed++;
+  }
+  if (!changed) return;
+  applyVisualConfig();
+  console.log("[merged-chat] relay: applied " + changed + " settings from app.properties");
+}
+
+function relayHandle(msg) {
+  switch (msg.t) {
+    case "hello":
+      // Appearance settings from app.properties, applied BEFORE any replay so
+      // the backlog is rendered with the right font size, caps and badges.
+      applyRelayConfig(msg.config);
+      for (const past of msg.history || []) relayHandle(past);
+      for (const k in (msg.status || {})) status(k, msg.status[k], true);
+      break;
+    case "irc":
+      handleIrcLine(msg.line);
+      break;
+    case "yt":
+      addYouTubeItem(msg.item);
+      break;
+    case "alert":
+      handleAlert(msg.subType, msg.event);
+      break;
+    case "status":
+      status(msg.key, msg.msg, statusSettled);
+      break;
   }
 }
 
@@ -555,23 +947,37 @@ function connectTwitch() {
   const channels = twitchChannels();
   if (!channels.length) { status("twitch", "Twitch: no channel set"); return; }
   const label = channels.map(c => "#" + c).join(" ");
-  status("twitch", "Twitch: connecting to " + label + "…");
+  reconnectStatus("twitch", "Twitch: connecting to " + label + "…");
   const ws = new WebSocket("wss://irc-ws.chat.twitch.tv:443");
 
   ws.onopen = () => {
     ws.send("CAP REQ :twitch.tv/tags twitch.tv/commands");
     ws.send("NICK justinfan" + Math.floor(Math.random() * 100000)); // anonymous
     for (const c of channels) ws.send("JOIN #" + c);               // one socket, many channels
-    status("twitch", "Twitch: connected to " + label);
+    reconnectStatus("twitch", "Twitch: connected to " + label);
+    statusConnected.twitch = true;
   };
 
   ws.onmessage = (ev) => {
     for (const line of ev.data.split("\r\n")) {
       if (!line) continue;
       if (line.startsWith("PING")) { ws.send("PONG :tmi.twitch.tv"); continue; }
+      handleIrcLine(line);
+    }
+  };
 
+  ws.onclose = () => {
+    reconnectStatus("twitch", "Twitch: disconnected, reconnecting in 3s…");
+    setTimeout(connectTwitch, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+// Render one raw IRC line. Split out from the socket handler so relay mode can
+// feed in lines the relay read on its behalf — same parsing either way.
+function handleIrcLine(line) {
       const m = parseIRC(line);
-      if (m.command !== "PRIVMSG") continue;
+      if (m.command !== "PRIVMSG") return;
 
       const nick = m.prefix.split("!")[0];
       const name = m.tags["display-name"] || nick;
@@ -599,14 +1005,473 @@ function connectTwitch() {
         sub: isSub,
         subMonths: subMatch ? subMatch[1] : "",
       });
+}
+
+/* ================= TWITCH CHANNEL POINT REDEEMS ================== */
+/* Channel points don't travel over chat (IRC), so anonymous mode can't    */
+/* see them. This uses Twitch EventSub over WebSocket, with a broadcaster   */
+/* token (channel:read:redemptions) that AUTO-REFRESHES so it never dies    */
+/* mid-stream. Run ?setup once to mint TWITCH_REFRESH_TOKEN.                */
+
+// Live redeem auth state. The access token is short-lived and refilled by
+// refreshRedeemToken(); the refresh token can rotate, so we track it in memory.
+// Scopes the alerts + redeems need. Raids need none; the rest each map to one.
+// ?setup requests them all so you never have to re-authorize when toggling.
+const ALERT_SCOPES = [
+  "channel:read:redemptions",   // channel points
+  "moderator:read:followers",   // follows
+  "channel:read:subscriptions", // subs / resubs / gift subs
+  "bits:read",                  // cheers
+  "channel:read:hype_train",    // hype trains
+];
+
+const redeemState = {
+  accessToken: "",
+  refreshToken: "",
+  userId: "",
+  login: "",
+  scopes: [],
+  refreshTimer: null,
+  // Set when reconnecting can't possibly help (every subscription came back 409
+  // — another page owns them). Twitch closes a session that subscribed to
+  // nothing, so without this the socket would retry every 5s forever.
+  giveUp: false,
+};
+
+// Build + place a redeem row. `e` is the EventSub event payload, which carries
+// the human-readable reward title and cost (things IRC never gives us).
+function addRedeemMessage(e) {
+  const name = e.user_name || e.user_login || "someone";
+  const reward = e.reward?.title || "a reward";
+  const cost = e.reward?.cost;
+  const input = (e.user_input || "").trim();
+
+  const row = document.createElement("div");
+  row.className = "msg tw redeem";
+
+  const costHtml = (typeof cost === "number")
+    ? `<span class="redeem-cost">${POINTS_ICON}${cost.toLocaleString()}</span>`
+    : "";
+
+  row.innerHTML =
+    `<span class="badge tw">${TWITCH_ICON}</span>` +
+    `<span class="tag redeem">${POINTS_ICON}</span>` +
+    `<span class="name" style="color:${colorFor(name)}">${escapeHtml(name)}</span> ` +
+    `<span class="text">redeemed <b>${escapeHtml(reward)}</b>${costHtml}` +
+      (input ? ` — ${escapeHtml(input)}` : "") +
+    `</span>`;
+
+  placeRow(row);
+}
+
+// Trade the refresh token for a fresh access token, learn who it belongs to,
+// and schedule the next refresh a few minutes before expiry. Returns true on
+// success, "dead" if the refresh token is unusable (setup must be re-run), or
+// false on a transient error worth retrying.
+async function refreshRedeemToken() {
+  let r, d;
+  try {
+    r = await fetch("https://id.twitch.tv/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: redeemState.refreshToken,
+        client_id: TW_CLIENT_ID,
+        client_secret: TW_SECRET,
+      }),
+    });
+    d = await r.json().catch(() => ({}));
+  } catch (err) {
+    status("redeems", "Redeems: token refresh network error — " + err.message + " (retrying)");
+    return false;
+  }
+
+  if (!r.ok || !d.access_token) {
+    const msg = d.message || d.error || ("HTTP " + r.status);
+    // 400/401 here means the refresh token itself is bad -> setup must be redone.
+    if (r.status === 400 || r.status === 401) {
+      status("redeems", "Redeems: refresh token invalid — re-run ?setup (" + msg + ")");
+      return "dead";
     }
+    status("redeems", "Redeems: token refresh failed — " + msg + " (retrying)");
+    return false;
+  }
+
+  redeemState.accessToken = d.access_token;
+  if (d.refresh_token) redeemState.refreshToken = d.refresh_token; // handle rotation
+
+  // First time: validate to learn the broadcaster's user id/login and which
+  // scopes were granted (we subscribe only to events whose scope is present).
+  if (!redeemState.userId) {
+    try {
+      const v = await fetch("https://id.twitch.tv/oauth2/validate", {
+        headers: { Authorization: "OAuth " + redeemState.accessToken },
+      });
+      const vd = await v.json();
+      redeemState.userId = vd.user_id || "";
+      redeemState.login = vd.login || "";
+      redeemState.scopes = vd.scopes || [];
+    } catch (err) {
+      status("redeems", "Redeems: token validate error — " + err.message);
+      return false;
+    }
+  }
+
+  // Re-arm the proactive refresh ~5 min before this token expires (default ~4h).
+  clearTimeout(redeemState.refreshTimer);
+  const ms = Math.max(((d.expires_in || 14400) - 300) * 1000, 60000);
+  redeemState.refreshTimer = setTimeout(function tick() {
+    refreshRedeemToken().then((res) => {
+      if (res === false) setTimeout(tick, 30000); // transient: retry soon
+    });
+  }, ms);
+  return true;
+}
+
+// Entry point: check config, get the first access token, then open EventSub.
+async function startTwitchRedeems() {
+  if (!CONFIG.SHOW_REDEEMS) return;
+  if (!TW_CLIENT_ID || !TW_SECRET || !TW_REFRESH) {
+    status("redeems", "Redeems: off (open ?setup once to enable channel points)");
+    return;
+  }
+  const refresh = TW_REFRESH;
+  // Seed from config only if we don't already hold a (possibly rotated) token.
+  if (!redeemState.refreshToken) redeemState.refreshToken = refresh;
+
+  reconnectStatus("redeems", "Redeems: getting access token…");
+  const ok = await refreshRedeemToken();
+  if (ok !== true) return; // "dead"/false already reported a clear status
+
+  connectRedeemSocket("wss://eventsub.wss.twitch.tv/ws", false);
+}
+
+// One EventSub WebSocket. On welcome we create the subscription (except on a
+// reconnect socket, where Twitch carries the existing subscription over). Uses
+// the current auto-refreshed access token, so the socket outlives token expiry.
+function connectRedeemSocket(url, isReconnect) {
+  reconnectStatus("redeems", isReconnect ? "Redeems: reconnecting…" : "Redeems: connecting EventSub…");
+  const ws = new WebSocket(url);
+  let keepaliveMs = 30000, keepaliveTimer = null;
+
+  const armKeepalive = () => {
+    clearTimeout(keepaliveTimer);
+    // If Twitch goes quiet past the keepalive window (+ slack), treat the socket
+    // as dead and close it; onclose reconnects.
+    keepaliveTimer = setTimeout(() => { try { ws.close(); } catch (_) {} }, keepaliveMs + 10000);
+  };
+
+  ws.onmessage = async (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch (_) { return; }
+    const type = msg.metadata && msg.metadata.message_type;
+    armKeepalive();
+
+    if (type === "session_welcome") {
+      const session = msg.payload.session;
+      keepaliveMs = (session.keepalive_timeout_seconds || 30) * 1000;
+      armKeepalive();
+      if (isReconnect) reconnectStatus("redeems", "Alerts: reconnected — watching " + redeemState.login);
+      else await subscribeAll(session.id);
+    } else if (type === "notification") {
+      handleAlert(msg.payload.subscription.type, msg.payload.event);
+    } else if (type === "session_reconnect") {
+      // Twitch wants us on a fresh URL. Open it, then drop this socket shortly after.
+      ws._replaced = true;
+      connectRedeemSocket(msg.payload.session.reconnect_url, true);
+      setTimeout(() => { try { ws.close(); } catch (_) {} }, 2000);
+    } else if (type === "revocation") {
+      // Subscription killed (token/authorization issue). Refresh + restart once.
+      reconnectStatus("redeems", "Redeems: subscription revoked — reconnecting…");
+      ws._replaced = true;
+      try { ws.close(); } catch (_) {}
+      setTimeout(startTwitchRedeems, 3000);
+    }
+    // session_keepalive needs no work beyond armKeepalive() above.
   };
 
   ws.onclose = () => {
-    status("twitch", "Twitch: disconnected, reconnecting in 3s…");
-    setTimeout(connectTwitch, 3000);
+    clearTimeout(keepaliveTimer);
+    if (ws._replaced) return;              // superseded by a reconnect/restart
+    if (redeemState.giveUp) return;        // nothing left to subscribe to (see subscribeAll)
+    reconnectStatus("redeems", "Redeems: disconnected, retrying in 5s…");
+    setTimeout(() => connectRedeemSocket("wss://eventsub.wss.twitch.tv/ws", false), 5000);
   };
-  ws.onerror = () => ws.close();
+  ws.onerror = () => { try { ws.close(); } catch (_) {} };
+}
+
+// Twitch subscription tier code -> friendly name.
+function tierName(tier) {
+  return ({ "1000": "Tier 1", "2000": "Tier 2", "3000": "Tier 3" })[tier] || "Tier 1";
+}
+
+// A single alert/event row (sub, cheer, follow, raid, hype…). `textHtml` is
+// already-safe HTML; `name` is escaped here. `kind` drives the pill colour.
+function addAlertRow(kind, iconSvg, name, textHtml) {
+  const row = document.createElement("div");
+  row.className = "msg tw alert " + kind;
+  const namePart = name
+    ? `<span class="name" style="color:${colorFor(name)}">${escapeHtml(name)}</span> `
+    : "";
+  row.innerHTML =
+    `<span class="badge tw">${TWITCH_ICON}</span>` +
+    `<span class="tag alert ${kind}">${iconSvg}</span>` +
+    namePart +
+    `<span class="text">${textHtml}</span>`;
+  placeRow(row);
+}
+
+// Route an EventSub notification to the right row renderer.
+function handleAlert(subType, e) {
+  switch (subType) {
+    case "channel.channel_points_custom_reward_redemption.add":
+      addRedeemMessage(e);
+      break;
+    case "channel.follow":
+      addAlertRow("follow", HEART_ICON, e.user_name, "followed");
+      break;
+    case "channel.subscribe":
+      if (e.is_gift) break; // gift recipients are announced by the gift event
+      addAlertRow("sub", STAR_ICON, e.user_name, "subscribed <b>" + tierName(e.tier) + "</b>");
+      break;
+    case "channel.subscription.message": {
+      const months = e.cumulative_months || 0;
+      const msgText = e.message && e.message.text ? " — " + escapeHtml(e.message.text) : "";
+      addAlertRow("sub", STAR_ICON, e.user_name,
+        "resubscribed <b>" + tierName(e.tier) + "</b>" +
+        (months ? " · " + months + " month" + (months === 1 ? "" : "s") : "") + msgText);
+      break;
+    }
+    case "channel.subscription.gift": {
+      const who = e.is_anonymous ? "Anonymous" : (e.user_name || "Someone");
+      const n = e.total || 1;
+      addAlertRow("gift", GIFT_ICON, who,
+        "gifted <b>" + n + "</b> " + tierName(e.tier) + " sub" + (n === 1 ? "" : "s"));
+      break;
+    }
+    case "channel.cheer": {
+      const who = e.is_anonymous ? "Anonymous" : (e.user_name || "Someone");
+      const msgText = e.message ? " — " + escapeHtml(e.message) : "";
+      addAlertRow("cheer", BITS_ICON, who,
+        "cheered <b>" + (e.bits || 0).toLocaleString() + "</b> bits" + msgText);
+      break;
+    }
+    case "channel.raid":
+      addAlertRow("raid", RAID_ICON, e.from_broadcaster_user_name,
+        "raided with <b>" + (e.viewers || 0).toLocaleString() + "</b> viewer" + (e.viewers === 1 ? "" : "s"));
+      break;
+    case "channel.hype_train.begin":
+      addAlertRow("hype", HYPE_ICON, "", "Hype Train started! <b>Level " + (e.level || 1) + "</b>");
+      break;
+  }
+}
+
+// Build the list of EventSub subscriptions to create, honouring the SHOW_*
+// toggles. Each carries the scope it needs (null = none) so we can skip any the
+// token wasn't granted instead of getting a 403.
+function alertSubDefs() {
+  const bid = redeemState.userId;
+  const a = CONFIG.SHOW_ALERTS || {};
+  const defs = [];
+  if (CONFIG.SHOW_REDEEMS)
+    defs.push({ type: "channel.channel_points_custom_reward_redemption.add", version: "1", scope: "channel:read:redemptions", condition: { broadcaster_user_id: bid } });
+  if (a.follows)
+    defs.push({ type: "channel.follow", version: "2", scope: "moderator:read:followers", condition: { broadcaster_user_id: bid, moderator_user_id: bid } });
+  if (a.subs) {
+    defs.push({ type: "channel.subscribe", version: "1", scope: "channel:read:subscriptions", condition: { broadcaster_user_id: bid } });
+    defs.push({ type: "channel.subscription.message", version: "1", scope: "channel:read:subscriptions", condition: { broadcaster_user_id: bid } });
+  }
+  if (a.giftSubs)
+    defs.push({ type: "channel.subscription.gift", version: "1", scope: "channel:read:subscriptions", condition: { broadcaster_user_id: bid } });
+  if (a.cheers)
+    defs.push({ type: "channel.cheer", version: "1", scope: "bits:read", condition: { broadcaster_user_id: bid } });
+  if (a.raids)
+    defs.push({ type: "channel.raid", version: "1", scope: null, condition: { to_broadcaster_user_id: bid } });
+  if (a.hypeTrain)
+    defs.push({ type: "channel.hype_train.begin", version: "1", scope: "channel:read:hype_train", condition: { broadcaster_user_id: bid } });
+  return defs;
+}
+
+// Create every enabled subscription on this session (skipping ones the token
+// lacks scope for). Must run within 10s of the welcome or Twitch drops us.
+async function subscribeAll(sessionId) {
+  const have = new Set(redeemState.scopes || []);
+  let ok = 0;
+  const missing = [];
+  let duplicate = 0, lastErr = "";
+  for (const def of alertSubDefs()) {
+    if (def.scope && !have.has(def.scope)) { missing.push(def.type); continue; }
+    const res = await createSubscription(def, sessionId);
+    if (res === true) ok++;
+    else if (res === 409) duplicate++;
+    else if (res) lastErr = res;
+  }
+  let msg = "Alerts: watching " + redeemState.login + " (" + ok + " event type" + (ok === 1 ? "" : "s") + ")";
+  if (missing.length) msg += " — re-run ?setup to grant the rest";
+  if (ok) statusConnected.redeems = true;
+  else if (duplicate) {
+    // Nothing subscribed and at least one was a duplicate: another page owns
+    // these, and reconnecting can't take them back. Stop, so a session Twitch
+    // closes for having no subscriptions can't spin the 5s retry loop forever.
+    redeemState.giveUp = true;
+    // Twitch allows one subscription per app + event type + channel. Another
+    // page (usually the stream source vs. the dock) already owns these.
+    msg = IS_DOCKED && !TW_DOCK_APP
+      ? "Alerts: already claimed by the stream source — set TWITCH_*_DOCK for a dock app"
+      : "Alerts: already claimed by another open copy of this page";
+  } else if (missing.length && !lastErr) msg = "Alerts: nothing subscribed — re-run ?setup to grant scopes";
+  else if (lastErr) msg = "Alerts: nothing subscribed — " + lastErr;
+  else msg = "Alerts: nothing subscribed — re-run ?setup";
+  status("redeems", msg);
+}
+
+// Create one subscription. Failures are logged (F12) and skipped, not fatal, so
+// one missing scope can't stop the others from working. Returns true on success,
+// 409 for "this app already has this subscription" (see subscribeAll), or a short
+// error string otherwise.
+async function createSubscription(def, sessionId) {
+  try {
+    const r = await fetch("https://api.twitch.tv/helix/eventsub/subscriptions", {
+      method: "POST",
+      headers: {
+        "Client-Id": TW_CLIENT_ID,
+        Authorization: "Bearer " + redeemState.accessToken,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        type: def.type,
+        version: def.version,
+        condition: def.condition,
+        transport: { method: "websocket", session_id: sessionId },
+      }),
+    });
+    if (r.ok) return true;
+    const err = await r.json().catch(() => ({}));
+    const why = err.message || ("HTTP " + r.status);
+    console.warn("[merged-chat] subscribe failed:", def.type, "-", why);
+    return r.status === 409 ? 409 : why;
+  } catch (err) {
+    console.warn("[merged-chat] subscribe error:", def.type, err.message);
+    return err.message || "network error";
+  }
+}
+
+/* --------- ?setup: one-time page to mint a refresh token --------- */
+// Renders a small two-step page (instead of the chat) that walks through the
+// Twitch OAuth authorization-code flow and hands back a long-lived refresh token
+// to paste into CONFIG.TWITCH_REFRESH_TOKEN. All in-browser (token endpoint is
+// CORS-open); nothing leaves this machine except the calls to Twitch itself.
+function runRedeemSetup() {
+  // ?setup&docked=true mints a token for the DOCK app instead. Can't reuse
+  // TW_CLIENT_ID here: that only switches once the dock refresh token exists,
+  // and minting it is exactly what this page is for. So key off IS_DOCKED.
+  const forDock = IS_DOCKED;
+  const clientId = ((forDock ? CONFIG.TWITCH_CLIENT_ID_DOCK : CONFIG.TWITCH_CLIENT_ID) || "").trim();
+  const secret = ((forDock ? CONFIG.TWITCH_CLIENT_SECRET_DOCK : CONFIG.TWITCH_CLIENT_SECRET) || "").trim();
+  const tokenField = forDock ? "TWITCH_REFRESH_TOKEN_DOCK" : "TWITCH_REFRESH_TOKEN";
+  const REDIRECT = "http://localhost";
+
+  document.body.classList.remove("docked");
+  document.documentElement.style.background = "#18181b";
+  document.body.style.background = "#18181b";
+  document.body.style.overflow = "auto";
+  document.body.innerHTML = "";
+
+  const wrap = document.createElement("div");
+  wrap.style.cssText =
+    "max-width:720px;margin:24px auto;padding:0 18px;color:#efeff1;" +
+    "font-family:'Segoe UI',Roboto,Arial,sans-serif;font-size:15px;line-height:1.55;";
+  document.body.appendChild(wrap);
+  const add = (html) => { const d = document.createElement("div"); d.innerHTML = html; wrap.appendChild(d); return d; };
+
+  if (!clientId || !secret) {
+    add(`<h2 style="color:#bf94ff">Channel point redeems — setup</h2>
+      <p style="color:#ff8a8a">First fill in <b>${forDock ? "TWITCH_CLIENT_ID_DOCK" : "TWITCH_CLIENT_ID"}</b>
+      and <b>${forDock ? "TWITCH_CLIENT_SECRET_DOCK" : "TWITCH_CLIENT_SECRET"}</b>
+      in the file (from <a style="color:#bf94ff" href="https://dev.twitch.tv/console/apps" target="_blank">dev.twitch.tv/console/apps</a>
+      — Redirect URL <code>http://localhost</code>), save, then reload this page.</p>`);
+    return;
+  }
+
+  const authUrl = "https://id.twitch.tv/oauth2/authorize?" + new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: REDIRECT,
+    response_type: "code",
+    scope: ALERT_SCOPES.join(" "),
+    force_verify: "true",
+  });
+
+  add(`<h2 style="color:#bf94ff">Channel point redeems — one-time setup</h2>
+    <p><b>Step 1.</b> Authorize your Twitch (broadcaster) account:</p>
+    <p><a href="${authUrl}" target="_blank"
+       style="display:inline-block;background:#9147ff;color:#fff;padding:10px 16px;border-radius:6px;text-decoration:none;font-weight:700">
+       Authorize with Twitch</a></p>
+    <p style="color:#adadb8">Your browser will jump to a <code>http://localhost/?code=…</code> page that
+    fails to load — that's expected. Copy the whole address bar (or just the <code>code=…</code> value)
+    and paste it below.</p>
+    <p style="margin-top:18px"><b>Step 2.</b> Paste it here:</p>`);
+
+  const ta = document.createElement("textarea");
+  ta.placeholder = "http://localhost/?code=abcd1234...&scope=channel%3Aread%3Aredemptions";
+  ta.style.cssText =
+    "width:100%;height:70px;background:#0e0e10;color:#efeff1;border:1px solid #444;" +
+    "border-radius:6px;padding:8px;font-family:monospace;box-sizing:border-box";
+  wrap.appendChild(ta);
+
+  const btn = document.createElement("button");
+  btn.textContent = "Get my refresh token";
+  btn.style.cssText =
+    "margin-top:10px;background:#9147ff;color:#fff;border:0;padding:10px 16px;" +
+    "border-radius:6px;font-weight:700;cursor:pointer";
+  wrap.appendChild(btn);
+
+  const out = document.createElement("div");
+  out.style.cssText = "margin-top:16px";
+  wrap.appendChild(out);
+
+  btn.onclick = async () => {
+    const raw = ta.value.trim();
+    const m = raw.match(/[?&]code=([^&\s]+)/) || raw.match(/^([A-Za-z0-9]+)$/);
+    const code = m ? decodeURIComponent(m[1]) : "";
+    if (!code) {
+      out.innerHTML = `<p style="color:#ff8a8a">Couldn't find a code there. Paste the whole
+        localhost URL, or just the code value.</p>`;
+      return;
+    }
+    out.innerHTML = `<p style="color:#adadb8">Exchanging…</p>`;
+    try {
+      const r = await fetch("https://id.twitch.tv/oauth2/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          client_id: clientId,
+          client_secret: secret,
+          code,
+          redirect_uri: REDIRECT,
+        }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.refresh_token) {
+        out.innerHTML = `<p style="color:#ff8a8a">Failed: ${escapeHtml(d.message || d.error || ("HTTP " + r.status))}.
+          Auth codes are single-use and expire within seconds — redo Step 1 for a fresh one.</p>`;
+        return;
+      }
+      out.innerHTML =
+        `<p style="color:#7bd88f"><b>Success!</b> Paste this into <code>${tokenField}</code>
+         in the file, save, then refresh the OBS ${forDock ? "dock" : "source"}:</p>`;
+      const box = document.createElement("textarea");
+      box.readOnly = true;
+      box.value = d.refresh_token;
+      box.style.cssText =
+        "width:100%;height:60px;background:#0e0e10;color:#7bd88f;border:1px solid #444;" +
+        "border-radius:6px;padding:8px;font-family:monospace;box-sizing:border-box";
+      out.appendChild(box);
+      box.focus(); box.select();
+    } catch (err) {
+      out.innerHTML = `<p style="color:#ff8a8a">Error: ${escapeHtml(err.message)}</p>`;
+    }
+  };
 }
 
 /* ============================= YOUTUBE ============================ */
@@ -629,7 +1494,7 @@ function youtubeVideoIds() {
 }
 
 function startYouTube() {
-  if (!YT_KEY) { status("youtube", "YouTube: no API key set (Twitch only)"); return; }
+  if (!YT_KEYS.length) { status("youtube", "YouTube: no API key set (Twitch only)"); return; }
   const ids = youtubeVideoIds();
   if (!ids.length) { status("youtube", "YouTube: no video ID set"); return; }
 
@@ -640,161 +1505,197 @@ function startYouTube() {
   });
 }
 
+/* --- Error handling ------------------------------------------------ */
+/* Quota is finite (see YT_MIN_POLL_MS), so a broken poll loop must never
+   retry forever in the background. Errors split two ways:
+     FATAL     — nothing will fix itself (quota gone, bad key, chat ended).
+                 Stop the loop; retrying only burns requests.
+     TRANSIENT — network blip, rate limit, Google 5xx, unrecognised error.
+                 Retry with exponential backoff, then give up after
+                 YT_MAX_RETRIES so a dead stream can't poll all night.     */
+
+// API error reasons where retrying is pointless.
+const YT_FATAL_REASONS = new Set([
+  "quotaExceeded", "dailyLimitExceeded",              // out of quota until midnight PT
+  "keyInvalid", "ipRefererBlocked", "accessNotConfigured",
+  "authenticationFailure", "forbidden",               // key / project misconfigured
+  "liveChatEnded", "liveChatNotFound", "liveChatDisabled",
+  "videoNotFound", "notFound",                        // the stream is gone
+]);
+// A drained key affects every loop on it, not just the one that noticed.
+const YT_QUOTA_REASONS = new Set(["quotaExceeded", "dailyLimitExceeded"]);
+
+let ytQuotaExhausted = false;   // set once; stops all YouTube polling on this key
+
+// Machine-readable reason out of a Data API error payload ("" if absent).
+function ytErrorReason(err) {
+  return err?.errors?.[0]?.reason || err?.status || "";
+}
+
+// Exponential backoff with jitter, so several merged loops don't retry in sync.
+function ytBackoffMs(tries) {
+  const base = Math.max(CONFIG.YT_MIN_POLL_MS || 0, 5000);
+  const cap  = Math.max(CONFIG.YT_BACKOFF_MAX_MS || 300000, base);
+  const wait = Math.min(base * Math.pow(2, tries - 1), cap);
+  return Math.round(wait * (0.8 + Math.random() * 0.4));
+}
+
+// Move to the next API key after the current one drains. Returns false when
+// there's nothing left to fall back to. Every poll loop shares ytKeyIndex, so
+// one loop hitting the limit switches all of them over at once.
+function ytRotateKey(statusKey) {
+  if (ytKeyIndex + 1 >= YT_KEYS.length) return false;
+  ytKeyIndex++;
+  const left = YT_KEYS.length - 1 - ytKeyIndex;
+  console.warn("[merged-chat] YouTube key " + ytKeyIndex + " drained; switching to backup key " +
+               ytKeyIndex + " of " + (YT_KEYS.length - 1) +
+               (left ? " (" + left + " still in reserve)" : " (last one)"));
+  status(statusKey, "YouTube: quota used up — switched to backup key " +
+                    ytKeyIndex + "/" + (YT_KEYS.length - 1));
+  return true;
+}
+
+// True if this error means "stop for good" — also latches the quota flag.
+function ytIsFatal(err, statusKey) {
+  const reason = ytErrorReason(err);
+  if (YT_QUOTA_REASONS.has(reason)) {
+    // Out of quota on this key. Fall back to the next one if we have it, and
+    // only give up for the day once every key is drained.
+    if (ytRotateKey(statusKey)) return false;
+    ytQuotaExhausted = true;
+    status(statusKey, YT_KEYS.length > 1
+      ? "YouTube: all " + YT_KEYS.length + " API keys out of quota — resets at midnight US Pacific"
+      : "YouTube: daily quota used up — resets at midnight US Pacific");
+    console.warn("[merged-chat] YouTube quota exhausted on every key; stopping all polling. " +
+                 "Raise YT_MIN_POLL_MS to make the daily quota last longer, " +
+                 "or add another key to YT_API_KEY_BACKUP.");
+    return true;
+  }
+  if (YT_FATAL_REASONS.has(reason)) {
+    status(statusKey, "YouTube stopped: " + (err?.message || reason));
+    return true;
+  }
+  return false;
+}
+
 async function startYouTubeVideo(videoId, statusKey) {
-  status(statusKey, "YouTube: connecting…");
+  if (ytQuotaExhausted) {   // don't spend the connect call on a drained key
+    status(statusKey, "YouTube: daily quota used up — resets at midnight US Pacific");
+    return;
+  }
+  reconnectStatus(statusKey, "YouTube: connecting…");
   try {
+    const keyBefore = ytKeyIndex;
     const r = await fetch(
-      `https://www.googleapis.com/youtube/v3/videos?part=snippet,liveStreamingDetails&id=${videoId}&key=${YT_KEY}`
+      `https://www.googleapis.com/youtube/v3/videos?part=snippet,liveStreamingDetails&id=${videoId}&key=${ytKey()}`
     );
     const d = await r.json();
-    if (d.error) { status(statusKey, "YouTube: " + (d.error.message || "API error")); return; }
+    if (d.error) {
+      if (ytIsFatal(d.error, statusKey)) return;
+      // A quota error just rolled us onto a backup key — retry the connect on
+      // it rather than dropping this video. Bounded: ytKeyIndex only ever
+      // climbs, and it stops at the end of YT_KEYS.
+      if (ytKeyIndex !== keyBefore) { startYouTubeVideo(videoId, statusKey); return; }
+      status(statusKey, "YouTube: " + (d.error.message || "API error"));
+      return;
+    }
 
     const item = d.items?.[0];
     const chatId = item?.liveStreamingDetails?.activeLiveChatId;
     if (!chatId) { status(statusKey, "YouTube: no active live chat (is the stream live?)"); return; }
 
     const channel = item?.snippet?.channelTitle || "channel";
-    status(statusKey, "YouTube: connected to " + channel);
+    reconnectStatus(statusKey, "YouTube: connected to " + channel);
+    statusConnected[statusKey] = true;
     pollYouTube(chatId, "", true, statusKey);
   } catch (e) {
     status(statusKey, "YouTube error: " + e.message);
   }
 }
 
-async function pollYouTube(chatId, pageToken, first, statusKey) {
+// Render one liveChat item. Split out from the poll loop so relay mode can feed
+// in items the relay fetched on its behalf — same rendering either way.
+function addYouTubeItem(it) {
+  const a = it.authorDetails || {};
+  addMessage({
+    platform: "yt",
+    name: a.displayName,
+    color: colorFor(a.displayName),
+    html: renderYouTube((it.snippet || {}).displayMessage || ""),
+    owner: a.isChatOwner,
+    mod: a.isChatModerator,
+    member: a.isChatSponsor,
+  });
+}
+
+async function pollYouTube(chatId, pageToken, first, statusKey, fails = 0) {
+  if (ytQuotaExhausted) return;   // another loop already drained this key
+
   try {
+    const keyBefore = ytKeyIndex;
     const url =
       `https://www.googleapis.com/youtube/v3/liveChat/messages` +
-      `?liveChatId=${chatId}&part=snippet,authorDetails&key=${YT_KEY}` +
+      `?liveChatId=${chatId}&part=snippet,authorDetails&key=${ytKey()}` +
       (pageToken ? `&pageToken=${pageToken}` : "");
 
     const r = await fetch(url);
     const d = await r.json();
-    if (d.error) { status(statusKey, "YouTube API: " + (d.error.message || "error")); return; }
+    if (d.error) {
+      if (ytIsFatal(d.error, statusKey)) return;
+      // Rolled onto a backup key — re-poll the SAME pageToken shortly, so the
+      // switch costs no messages and doesn't go through the backoff path.
+      if (ytKeyIndex !== keyBefore) {
+        setTimeout(() => pollYouTube(chatId, pageToken, first, statusKey, 0), 1000);
+        return;
+      }
+      // Anything else (rate limit, 5xx, unknown) goes to the backoff path.
+      throw new Error(d.error.message || ytErrorReason(d.error) || "API error");
+    }
 
     // Skip the initial backlog so we start clean (unless SHOW_BACKLOG is on)
     if (!(first && !CONFIG.SHOW_BACKLOG)) {
-      for (const it of d.items || []) {
-        const a = it.authorDetails;
-        addMessage({
-          platform: "yt",
-          name: a.displayName,
-          color: colorFor(a.displayName),
-          html: renderYouTube(it.snippet.displayMessage || ""),
-          owner: a.isChatOwner,
-          mod: a.isChatModerator,
-          member: a.isChatSponsor,
-        });
-      }
+      for (const it of d.items || []) addYouTubeItem(it);
     }
 
     // Respect the API's suggested interval, but never faster than 2s, and never
-    // faster than YT_MIN_POLL_MS if the user set one (to save quota).
+    // faster than YT_MIN_POLL_MS (the quota saver — 15s by default).
     const floor = Math.max(CONFIG.YT_MIN_POLL_MS || 0, 2000);
     const wait = Math.max(d.pollingIntervalMillis || 5000, floor);
-    setTimeout(() => pollYouTube(chatId, d.nextPageToken, false, statusKey), wait);
+    setTimeout(() => pollYouTube(chatId, d.nextPageToken, false, statusKey, 0), wait);
   } catch (e) {
-    status(statusKey, "YouTube poll error: " + e.message);
-    setTimeout(() => pollYouTube(chatId, pageToken, first, statusKey), 5000);
+    // Transient failure: back off, and stop entirely once we've tried enough.
+    const tries = fails + 1;
+    const max   = CONFIG.YT_MAX_RETRIES ?? 6;   // missing from an older CONFIG block = use the default
+    if (max > 0 && tries > max) {
+      status(statusKey, `YouTube: gave up after ${max} failed polls (${e.message}) — reload to reconnect`);
+      return;
+    }
+    const wait = ytBackoffMs(tries);
+    reconnectStatus(statusKey, `YouTube: retrying in ${Math.round(wait / 1000)}s` +
+                      (max > 0 ? ` (${tries}/${max})` : "") + ` — ${e.message}`);
+    setTimeout(() => pollYouTube(chatId, pageToken, first, statusKey, tries), wait);
   }
-}
-
-/* ============================== DEMO ============================= */
-/* Fake messages for testing the look without a stream or API key.   */
-async function startDemo() {
-  const names = ["alice", "Bob_TTV", "carol99", "DangerDan", "emily_x",
-                 "GamerGirl", "h4 x0r", "IzzyLol", "JoeKing", "kevin"];
-  const lines = ["hi everyone!", "that was insane", "gg", "first time catching you live",
-                 "poggers", "how's it going?", "let's gooo", "what game is this?",
-                 "nice play 👏", "🔥🔥🔥", "welcome back", "LMAO", "o7", "cracked",
-                 "🔥👏😂🎉💯", "GGGG 🎉🎉🎉🎉", "let's gooooo 🚀🚀🚀", "this song is such a vibe 🎶😎",
-                 "no wayyy did you see that clutch?? my heart literally stopped for a second 😭",
-                 "been watching since the start and this is easily the best run all week 🙌",
-                 "ok but can we talk about how clean that movement was, cracked aim ngl 🎯",
-                 "first time catching the stream live, love the content keep it up!! 💜💜",
-                 "the most chill stream I've found, community seems super wholesome 🥹",
-                 "wait what just happened, looked away for two seconds and chat is going crazy 💀💀",
-                 "stream looks so crisp today, did you change something with the setup? 👀"];
-  const pick = (a) => a[Math.floor(Math.random() * a.length)];
-
-  // Demo emotes. Globals (render anywhere) are the always-available fallback; the
-  // configured channel's REAL emotes are fetched below and merged in, so the demo
-  // automatically reflects whatever channel this file is set up for.
-  const EMOTES = {
-    Kappa: "25", LUL: "425618", PogChamp: "305954156", Kreygasm: "41",
-    "4Head": "354", "<3": "9", SeemsGood: "64138", NotLikeThis: "58765",
-  };
-  // Pull a channel's emotes (name -> id) from ivr.fi — public, no auth, CORS-open.
-  async function fetchChannelEmotes(login) {
-    if (!login) return;
-    try {
-      const r = await fetch(`https://api.ivr.fi/v2/twitch/emotes/channel/${encodeURIComponent(login)}`);
-      if (!r.ok) return;
-      const d = await r.json();
-      for (const sp of d.subProducts || [])
-        for (const e of sp.emotes || [])
-          if (e.code && e.id) EMOTES[e.code] = e.id;
-    } catch (_) { /* offline / CORS / no emotes: just use the globals */ }
-  }
-  const channels = [CONFIG.TWITCH_CHANNEL, ...(CONFIG.TWITCH_CHANNELS || [])].filter(Boolean);
-  await Promise.all(channels.map(fetchChannelEmotes));
-  const emoteNames = Object.keys(EMOTES);
-
-  const emoteUrl = (id) => `https://static-cdn.jtvnw.net/emoticons/v2/${id}/default/dark/2.0`;
-  // Swap known emote words for their Twitch images; escape everything else.
-  const demoRender = (text) => text.split(" ").map((w) =>
-    EMOTES[w]
-      ? `<img class="emote" src="${emoteUrl(EMOTES[w])}" alt="${w}">`
-      : escapeHtml(w)
-  ).join(" ");
-  // Randomly sprinkle a few emotes onto a message (used for Twitch demo rows).
-  const withEmotes = (text) => {
-    if (!emoteNames.length || Math.random() > 0.45) return text;
-    const n = 1 + Math.floor(Math.random() * 3);
-    const e = Array.from({ length: n }, () => pick(emoteNames)).join(" ");
-    return Math.random() < 0.5 ? `${text} ${e}` : `${e} ${text}`;
-  };
-  // YouTube demo emotes: the :shortcodes: from CONFIG.YT_EMOTES (rendered as images
-  // by renderYouTube). Populate YT_EMOTES to see your member emotes in the demo.
-  const ytEmoteCodes = Object.keys(CONFIG.YT_EMOTES || {});
-  const withYtEmotes = (text) => {
-    if (!ytEmoteCodes.length || Math.random() > 0.45) return text;
-    const n = 1 + Math.floor(Math.random() * 3);
-    const e = Array.from({ length: n }, () => pick(ytEmoteCodes)).join(" ");
-    return Math.random() < 0.5 ? `${text} ${e}` : `${e} ${text}`;
-  };
-
-  setInterval(() => {
-    const platform = Math.random() < 0.5 ? "yt" : "tw";
-    const yt = platform === "yt";
-    const name = pick(names);
-    const roll = Math.random();
-    addMessage({
-      platform,
-      name,
-      color: colorFor(name),
-      html: yt
-        ? renderYouTube(withYtEmotes(pick(lines)))
-        : demoRender(withEmotes(pick(lines))),
-      owner: roll > 0.95,                          // ~5% broadcaster
-      headMod: !yt && roll > 0.92 && roll <= 0.95, // ~3% Twitch head mod (war hammer)
-      mod: roll > 0.85 && roll <= 0.92,            // ~7% mod
-      vip: !yt && roll > 0.78 && roll <= 0.85,     // Twitch VIP
-      sub: !yt && roll > 0.55 && roll <= 0.78,     // Twitch subscriber
-      subMonths: pick(["1", "6", "12", "24"]),
-      member: yt && roll > 0.55 && roll <= 0.85,   // YouTube member
-    });
-  }, 1200);
-
-  status("demo", "DEMO MODE — showing fake messages (set DEMO_MODE:false to go live)");
 }
 
 /* ============================== GO =============================== */
-if (CONFIG.DEMO_MODE) {
-  startDemo();
+if (IS_SETUP) {
+  runRedeemSetup();               // ?setup: one-time flow to mint a refresh token
+} else if (RELAY_URL) {
+  // Preferred path: one relay process feeds every open page. Falls back to
+  // running standalone if it isn't up, so the file still works on its own.
+  status("relay", "Relay: connecting…");
+  connectRelay(startDirect);
 } else {
+  startDirect();
+}
+
+// Do the network work in this page — the original behaviour, and what a page
+// falls back to when there's no relay running.
+function startDirect() {
+  status("relay", "");
   connectTwitch();
   startYouTube();
+  startTwitchRedeems();
 }
 </script>
 </body>

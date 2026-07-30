@@ -16,10 +16,17 @@ Keep all files together in the same folder.
 | --- | --- |
 | `merged-chat.html` | The real overlay. Your channel + API key go in here. This is the one you load in OBS. |
 | `merged-chat-example.html` | A clean copy with **no** channel/key filled in (safe to share or back up). Uses the default font; Teko left as an option. |
+| `relay.py` | Optional but recommended: one local process that does all the network work and feeds every open view, so a source and a dock share one connection and one quota. See [Sharing one connection](#sharing-one-connection-between-every-view-relaypy). |
+| `install-requirements.bat` | Windows one-time setup: installs the Python package and creates `app.properties`. |
+| `start-relay.bat` | Windows: starts the relay. Double-click it before you stream. |
+| `requirements.txt` | The Python packages the relay needs. |
+| `app.properties.example` | Documented template for the relay's settings. |
+| `app.properties` | Your real relay settings (channel, keys, token). Created by you from the template. |
 | `README.md` | This file. |
 
-> **Note:** `merged-chat.html` is git-ignored because it holds your private API
-> key. Share `merged-chat-example.html` instead.
+> **Note:** `merged-chat.html` and `app.properties` are git-ignored because they
+> hold your private API keys. Share `merged-chat-example.html` and
+> `app.properties.example` instead.
 
 ## How It Works (why it needs what it needs)
 
@@ -29,6 +36,11 @@ Keep all files together in the same folder.
   uses the YouTube Data API v3, which requires a free API key tied to a Google
   account. Without the key, the Twitch half still works; the YouTube half stays
   empty.
+- **Twitch alerts & channel points (optional):** subs, cheers, follows, raids,
+  hype trains, and channel point redeems can also appear in the feed. These don't
+  travel over chat, so they use Twitch EventSub and need a one-time Twitch token
+  (see [Twitch Alerts & Channel Point
+  Redeems](#twitch-alerts--channel-point-redeems-optional)). Plain chat needs none.
 - Both work from a plain `file://` page, so **no** local web server is needed.
 
 ## Visual Features (what you'll see)
@@ -40,6 +52,9 @@ Keep all files together in the same folder.
 - Usernames are colored: Twitch uses each chatter's own color; everyone else
   gets a stable auto-generated color from their name.
 - Twitch emotes are rendered as images.
+- Optionally, Twitch **alerts and channel point redeems** (subs, cheers, follows,
+  raids, hype trains, redemptions) appear as distinct colored rows — see [Twitch
+  Alerts & Channel Point Redeems](#twitch-alerts--channel-point-redeems-optional).
 - New messages pop in with a quick animation.
 - All text has a black outline so it stays readable over any video, and the page
   background is transparent for OBS.
@@ -51,6 +66,22 @@ Keep all files together in the same folder.
   ```
 
   It auto-hides after a few seconds (configurable — see `STATUS_HIDE_SEC`).
+
+## Where settings live
+
+Once you're running the relay — the normal setup — there are two files, and only
+one of them you'll normally touch:
+
+| File | Holds | When it's used |
+| --- | --- | --- |
+| **`app.properties`** | Channel, video IDs, API keys, Twitch token, **and all appearance settings** (font size, message caps, fade, colours, head mods, YouTube emotes) | Read by the relay and sent to every view on connect. **This is the file to edit.** |
+| `merged-chat.html` CONFIG | The same appearance keys, as fallback defaults, plus `RELAY_URL` | Only used when no relay is running. `RELAY_URL` / `RELAY_PORT_TRIES` always come from here — they're how a page finds the relay. |
+
+Change appearance in `app.properties`, restart the relay, refresh the page. You
+should not need to edit the HTML at all.
+
+The rest of this section describes the HTML CONFIG keys; each has an
+`app.properties` equivalent listed in `app.properties.example`.
 
 ## Step 1 — Edit the Config (top of `merged-chat.html`)
 
@@ -66,6 +97,7 @@ Notepad). Near the top, find the CONFIG block.
 | `YT_VIDEO_ID` | `"VIDEO_ID"` — the `v=...` id from the youtube URL |
 | `YT_VIDEO_IDS` | `[]` — optional extra live video IDs to merge in (see below) |
 | `YT_API_KEY` | `"YOUR_API_KEY"` — paste your YouTube Data API key |
+| `YT_MIN_POLL_MS` | `15000` — how often to poll YouTube chat (quota saver, see below) |
 
 - The YouTube video ID is the part after `v=` in the watch / live_chat URL.
   Example: `https://www.youtube.com/live_chat?is_popout=1&v=VIDEO_ID` → the ID is
@@ -111,66 +143,260 @@ YT_VIDEO_IDS : ["VIDEO_ID_2", "VIDEO_ID_3"],
 > **⚠️ Quota warning:** unlike Twitch (which is free), **every** YouTube chat
 > consumes your daily API quota (10,000 units). Merging two or three streams
 > burns through it 2–3× faster, and a long multi-stream session can hit
-> `quotaExceeded` (resets at midnight US Pacific). For heavy use, request a quota
-> increase or give each stream its own Google Cloud project/key.
+> `quotaExceeded` (resets at midnight US Pacific). For heavy use, add
+> [backup keys](#backup-api-keys-for-when-quota-runs-out-yt_api_key_backup) from
+> extra Google Cloud projects, raise `YT_MIN_POLL_MS`, or request a quota increase.
 
 ### Controlling YouTube quota usage (polling rate)
 
-YouTube quota is spent on **how often** the page polls for new messages. By
-default (`YT_MIN_POLL_MS : 0`) it polls as fast as the API allows (~2–5s) for the
-snappiest chat. If you're running close to your quota — for example because you
-load the overlay **both** as an OBS Browser source *and* as a dock (that's two
-independent pages, so ~2× the polling) — slow it down:
+YouTube quota is spent on **how often** the page polls for new messages. Each
+poll costs **5 quota units**, so the 10,000/day allowance is really **2,000
+polls**, shared across every YouTube source on that key. The default is:
 
 ```js
-YT_MIN_POLL_MS : 15000,   // poll every 15s instead of ~5s (~3× less quota)
+YT_MIN_POLL_MS : 15000,   // poll every 15s — roughly 8 hours of stream
 ```
 
+| `YT_MIN_POLL_MS` | Polls/hr | Units/hr | Runtime on a fresh 10,000 |
+| --- | --- | --- | --- |
+| `0` (as fast as the API allows, ~5s) | 720 | 3,600 | ~2.8 hr |
+| `10000` | 360 | 1,800 | ~5.5 hr |
+| `15000` (default) | 240 | 1,200 | ~8.3 hr |
+| `30000` | 120 | 600 | ~16.6 hr |
+
+- **Polling slower never drops messages.** Each poll returns everything posted
+  since the previous one, so a longer interval just delivers a bigger batch. The
+  only cost is latency — at 15s a YouTube message shows up ~7s late on average.
+  Twitch is unaffected (it's free and event-driven, not polled).
 - The value is the **minimum** milliseconds between polls. A 2-second hard floor
   always applies, so values below 2000 behave the same as `0`.
-- Higher = less quota used, but new YouTube messages appear a few seconds later.
-  Twitch is unaffected (it's free and event-driven, not polled).
-- Rough guide: `0`/fastest ≈ ~3,600 units/hr per chat per page; `15000` cuts that
-  to roughly a third. Watch your real usage in **Google Cloud Console → APIs &
-  Services → YouTube Data API v3 → Metrics**.
+- **Divide the runtime by the number of YouTube sources.** Each video ID in
+  `YT_VIDEO_ID` / `YT_VIDEO_IDS` gets its own poll loop, so two YouTube chats at
+  `15000` = ~4 hr, not ~8. Opening the overlay as *both* a Browser source and a
+  dock costs nothing extra when [`relay.py`](#sharing-one-connection-between-every-view-relaypy)
+  is running — they share one connection. To extend the runtime past a single
+  key, add a backup key.
+- Watch your real usage in **Google Cloud Console → APIs & Services → YouTube
+  Data API v3 → Metrics**. Quota resets at midnight US Pacific.
+
+### When YouTube errors out
+
+The overlay won't retry a broken connection forever in the background. Errors are
+split into two kinds:
+
+- **Fatal — stops immediately.** Quota exhausted, invalid/blocked API key, or the
+  live chat ended / was disabled / the video is gone. Retrying can't fix any of
+  these, so the loop stops and the status line says why. Quota exhaustion stops
+  **every** YouTube source on that key at once, and blocks the connect call too,
+  so reloading the page won't nibble at a quota that's already gone.
+- **Transient — retries with backoff, then gives up.** Network drops, rate
+  limits, Google 5xx, or any error the overlay doesn't recognise. Each retry
+  waits roughly twice as long as the last (jittered so merged sources don't
+  retry in lockstep), then the loop stops for good.
+
+```js
+YT_MAX_RETRIES    : 6,        // consecutive failed polls before giving up (0 = never)
+YT_BACKOFF_MAX_MS : 300000,   // ceiling on the wait between retries (5 min)
+```
+
+At the defaults that's retries at roughly 15s, 30s, 1m, 2m, 4m, 5m — about 13
+minutes of trying before it stops — 6 requests total, where the old fixed
+5-second retry would have kept firing 720 an hour indefinitely. The status line shows
+the countdown (`YouTube: retrying in 30s (2/6)`), and reloading the page starts
+a fresh connection.
 
 > **Tip:** another way to expand headroom is to give each page its own API key
 > from a *separate* Google Cloud project — each project has its own independent
 > 10,000/day quota. See the next section for how to point the dock at a second key.
 
-### Giving the dock its own API quota (`?docked=true`)
+### Sharing one connection between every view (`relay.py`)
 
-If you run the overlay as **both** a stream Browser source and an OBS dock, the
-two pages each poll YouTube independently and share one quota. You can give the
-dock its **own** quota by pointing it at a second API key:
+**This is the recommended way to run a source + dock.**
 
-1. In Google Cloud, create a **second project**, enable **YouTube Data API v3** in
-   it, and make an API key (Application restrictions = **None**, same as the
-   first). This project has its own separate 10,000/day quota.
-2. Paste that key into `YT_API_KEY_DOCK` in the CONFIG block:
+Open this overlay twice — the usual setup being an OBS Browser source plus an OBS
+custom browser dock — and each page would poll YouTube separately (double quota)
+and each would try to claim the same Twitch EventSub subscriptions (Twitch
+answers the second one with a 409).
 
-   ```js
-   YT_API_KEY      : "AIza...PRIMARY",     // stream source uses this
-   YT_API_KEY_DOCK : "AIza...SECONDARY",   // dock uses this instead
+`relay.py` fixes that by moving the network work out of the browser. One small
+Python process holds **one** Twitch chat connection, polls each YouTube chat
+**once**, holds **one** EventSub session, and re-broadcasts everything to every
+open page over a local WebSocket. Every view then shows identical chat, however
+many you have open.
+
+#### Setup (Windows)
+
+1. **Double-click `install-requirements.bat`.** It finds Python, installs the
+   one package the relay needs, and creates `app.properties` from the template
+   (offering to open it in Notepad).
+
+2. **Fill in `app.properties`** — your channel, YouTube video ID and API key.
+   Every setting is documented in `app.properties.example`. This file is
+   **git-ignored**, so your keys stay out of the repo.
+
+3. **Double-click `start-relay.bat`** before you stream, and leave the window
+   open. Closing it stops the relay.
+
+If Python isn't installed, get it from
+[python.org/downloads](https://www.python.org/downloads/) and tick
+**"Add python.exe to PATH"** during setup.
+
+#### Setup (macOS / Linux, or by hand)
+
+1. Install the dependency:
+
+   ```
+   python3 -m pip install -r requirements.txt
    ```
 
-3. Open the **dock** with `?docked=true` in its URL:
+2. Copy the config template and fill it in:
 
    ```
-   file:///D:/.../merged-chat.html?docked=true
+   cp app.properties.example app.properties
    ```
 
-When `docked=true` is present, the page uses `YT_API_KEY_DOCK` (so the dock draws
-from the second project's quota); without it, the page uses `YT_API_KEY` as
-normal. If `YT_API_KEY_DOCK` is left blank, `docked=true` simply falls back to the
-primary key (no harm).
+3. Start it (leave it running while you stream):
 
-- **`?docked=true` is independent of `?bg=dark`.** One picks the API key, the
-  other only sets the background. Combine them as needed, e.g. a dark dock on its
-  own quota: `...merged-chat.html?bg=dark&docked=true`. You can also use `#docked`
-  at the end of the URL instead of the query param.
-- Open the dock's console (F12) to confirm which key it picked — it logs
-  `docked mode: using dock YouTube key (separate quota)`.
+   ```
+   python3 relay.py
+   ```
+
+   ```
+   [09:42:01] Merged Chat relay starting
+   [09:42:01]   twitch channels : your_channel
+   [09:42:01]   youtube keys    : 2 (1 primary + 1 backup)
+   [09:42:01]   listening on    : ws://127.0.0.1:8777-8786  (history 400)
+   [09:42:01] relay ready on ws://127.0.0.1:8777 — open merged-chat.html in OBS
+   ```
+
+Then open the overlay in OBS as usual. `RELAY_URL` in the CONFIG block already
+points at `ws://127.0.0.1:8777`, so there's nothing else to change.
+
+#### Viewing chat on another device (phone, tablet, second PC)
+
+The relay also serves the overlay over plain HTTP on the same port, so another
+device on your network can just browse to it — nothing to copy, nothing to
+install there.
+
+1. Set `relay.host=0.0.0.0` in `app.properties` (it defaults to `127.0.0.1`,
+   which only allows this machine).
+2. Restart the relay. It prints the address to use:
+
+   ```
+   relay ready. Open the overlay at:
+       this machine  :  http://127.0.0.1:8777/
+       other devices :  http://192.168.50.83:8777/     <-- phone, tablet, second PC
+                        (same wifi/LAN; no setup needed on that device)
+   ```
+
+3. Type that second address into the other device's browser.
+
+The page works out where the relay is from the address it was loaded from, so a
+phone talks to your PC rather than to itself — there is nothing to configure on
+the device. Add `?bg=dark` for a readable dark background on a phone:
+`http://192.168.50.83:8777/?bg=dark&docked=true`.
+
+You can also point the **OBS Browser source** at the `http://` address instead of
+the local file if you prefer; both show the same chat.
+
+> **Only do this on a network you trust.** The port has no password, so anyone
+> who can reach your machine on the LAN can read your chat overlay. It stays
+> bound to `127.0.0.1` until you change `relay.host` yourself.
+
+#### If the port is already in use
+
+The relay walks upward to the next free port (`8777`, `8778`, … for
+`relay.port.attempts` tries) and says so:
+
+```
+[09:42:01] port 8777 is busy ([WinError 10048] ...)
+[09:42:01] *** using port 8778 instead of 8777 — the page scans this range,
+           so no config change is needed ***
+```
+
+The page scans the same range (`RELAY_PORT_TRIES` in the CONFIG block), so it
+finds the relay wherever it landed — **you don't need to change anything**. Keep
+the two numbers in step if you edit either. If every port in the range is taken,
+the relay exits with a message rather than starting up unreachable.
+
+#### What you get
+
+- **One** YouTube quota, no matter how many views are open.
+- **One** set of EventSub subscriptions — no 409s, no second Twitch app, so
+  `TWITCH_CLIENT_ID_DOCK` and friends are no longer needed.
+- Every view renders **identical** chat, because they all receive the same
+  payloads.
+- A dock opened mid-stream replays the last `relay.history` rows, so it has
+  scroll-back immediately instead of an empty feed.
+- Chat survives an OBS refresh — the relay keeps running, so nothing reconnects
+  and no messages are missed while a source reloads.
+
+#### If the relay isn't running
+
+Each page just connects directly, exactly as before. Nothing breaks; you simply
+go back to one quota per page. So it's safe to leave `RELAY_URL` set even when
+you don't start the relay.
+
+To force a page to connect directly, blank `RELAY_URL` in the CONFIG block.
+
+#### Notes
+
+- The relay listens on `127.0.0.1` only, so nothing is exposed off your machine.
+  `relay.host=0.0.0.0` would let other machines on your LAN connect — the port is
+  unauthenticated, so only do that deliberately.
+- Config lives in `app.properties`, **not** in the HTML, when you run the relay.
+  The HTML's `TWITCH_CHANNEL` / `YT_API_KEY` / etc. are only used in direct mode.
+  Appearance settings (fonts, sizes, fade, badges) always come from the HTML.
+- Run a second setup by pointing it at another file: `python relay.py other.properties`.
+- Restart the relay after editing `app.properties`.
+
+### Backup API keys for when quota runs out (`YT_API_KEY_BACKUP`)
+
+YouTube quota is granted **per Google Cloud project**, so a key from a second
+project carries its own separate 10,000/day. Give the overlay one or more backup
+keys and it will roll onto the next one when the current key runs dry, instead of
+dropping YouTube chat for the rest of the day:
+
+```js
+YT_API_KEY        : "AIza...PRIMARY",
+YT_API_KEY_BACKUP : "AIza...SECOND",                      // one key
+YT_API_KEY_BACKUP : ["AIza...SECOND", "AIza...THIRD"],    // ...or several
+```
+
+To make a backup key: in Google Cloud create a **new project**, enable **YouTube
+Data API v3** in it, and make an API key with Application restrictions = **None**
+(same as the primary — a referrer restriction blocks `file://` pages). Repeat for
+as many as you want.
+
+What you'll see when the primary drains mid-stream:
+
+```
+YouTube: quota used up — switched to backup key 1/2
+```
+
+The switch re-polls the *same* page of chat on the new key, so no messages are
+lost and it doesn't go through the retry backoff — chat keeps flowing. All poll
+loops share one key pointer, so if you merge several YouTube chats they all move
+across together. Only once **every** key is drained does it stop for the day:
+
+```
+YouTube: all 3 API keys out of quota — resets at midnight US Pacific
+```
+
+Notes:
+
+- Keys are tried in order and de-duplicated; blanks are ignored. With no backup
+  set, behaviour is exactly as before.
+- Rotation only triggers on a genuine quota error (`quotaExceeded` /
+  `dailyLimitExceeded`). A bad key or a disabled API is still reported as a plain
+  error rather than silently burning through your spares.
+- Backups don't multiply your polling rate — they extend how long you can run.
+  `YT_MIN_POLL_MS` is still what decides how fast a single key is consumed.
+
+> **Migrating from `YT_API_KEY_DOCK`:** that key used to serve the dock's separate
+> quota, which the relay made unnecessary. It's now read as a backup key, so an
+> existing config keeps working untouched — but rename it to `YT_API_KEY_BACKUP`
+> when convenient, since that's what it now does.
 
 #### Keeping a long history & scrolling back (`DOCK_RETAIN_ALL`)
 
@@ -374,6 +600,141 @@ it reads smaller.
 | Standard vertical overlay | 400 x 800 | 18 |
 | Big, readable "just chatting" | 480 x 900 | 22 |
 
+## Twitch Alerts & Channel Point Redeems (optional)
+
+By default the feed shows **chat only**. You can also fold your Twitch **channel
+point redemptions** and **alerts** — subs, resubs, gift subs, cheers (bits),
+follows, raids, and hype trains — into the same feed, each as a colored row with
+its own icon.
+
+These don't travel over chat, so they use **Twitch EventSub** (a separate
+connection) which needs a token for **your broadcaster account**. Unlike the chat
+connection, this one takes a one-time setup — but it **auto-refreshes**, so once
+configured it never expires mid-stream.
+
+> You can only read events for the channel that **owns the token** — i.e. your own
+> channel. You can't pull another streamer's redeems/subs.
+
+### What shows up
+
+| Event | Example row | Color |
+| --- | --- | --- |
+| Channel point redeem | `name redeemed` **Hydrate!** `◍500` | purple |
+| Subscription | `name subscribed` **Tier 1** | red |
+| Resub (with message) | `name resubscribed` **Tier 1** `· 6 months — message` | red |
+| Gift sub | `name gifted` **5** `Tier 1 subs` | magenta |
+| Cheer / bits | `name cheered` **500** `bits — message` | purple |
+| Follow | `name followed` | blue |
+| Raid | `name raided with` **48** `viewers` | amber |
+| Hype train | `Hype Train started!` **Level 2** | orange |
+
+Each type can be toggled independently — see the config keys below.
+
+### One-time setup
+
+1. **Register a Twitch app** at <https://dev.twitch.tv/console/apps> → *Register
+   Your Application*.
+   - **OAuth Redirect URL:** exactly `http://localhost`
+   - **Category:** anything; **Client Type:** Confidential.
+   - Copy the **Client ID**, then click **New Secret** and copy the **Client
+     Secret**. (Already have a Twitch app? Reuse it — just make sure
+     `http://localhost` is in its redirect URLs.)
+2. Paste both into the CONFIG block and save:
+
+   ```js
+   TWITCH_CLIENT_ID     : "your-client-id",
+   TWITCH_CLIENT_SECRET : "your-client-secret",
+   TWITCH_REFRESH_TOKEN : "",   // filled in by the next step
+   ```
+3. **Get your refresh token** — open the file in a normal browser with `?setup`
+   on the end:
+
+   ```
+   file:///D:/.../merged-chat.html?setup
+   ```
+
+   Click **Authorize with Twitch** (logged in as your broadcaster account), approve
+   the permissions, then copy the `http://localhost/?code=…` address your browser
+   lands on (that page failing to load is expected) and paste it back into the box.
+   It hands you a **refresh token**.
+4. Paste that into `TWITCH_REFRESH_TOKEN`, save, and Refresh the OBS source. The
+   status box should read **`Alerts: watching <you> (8 event types)`**.
+
+From then on the overlay refreshes its own token automatically — no more manual
+steps, even across multi-hour streams.
+
+> **Where the credentials live:** the Client Secret and refresh token sit in plain
+> text in `merged-chat.html`, which is git-ignored — same as the YouTube API key.
+> Don't screen-share or post that file.
+
+### Config keys
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `SHOW_REDEEMS` | `true` | Show channel point redemptions. |
+| `SHOW_ALERTS.follows` | `true` | Show follows. |
+| `SHOW_ALERTS.subs` | `true` | Show new subs + resubs (with message). |
+| `SHOW_ALERTS.giftSubs` | `true` | Show gift subs. |
+| `SHOW_ALERTS.cheers` | `true` | Show cheers (bits). |
+| `SHOW_ALERTS.raids` | `true` | Show incoming raids. |
+| `SHOW_ALERTS.hypeTrain` | `true` | Announce when a hype train starts. |
+| `TWITCH_CLIENT_ID` | `""` | Your Twitch app's Client ID. |
+| `TWITCH_CLIENT_SECRET` | `""` | Your Twitch app's Client Secret. |
+| `TWITCH_REFRESH_TOKEN` | `""` | The refresh token from the `?setup` flow. |
+| `TWITCH_CLIENT_ID_DOCK` | `""` | Second Twitch app's Client ID, used only with `?docked=true`. |
+| `TWITCH_CLIENT_SECRET_DOCK` | `""` | Second Twitch app's Client Secret. |
+| `TWITCH_REFRESH_TOKEN_DOCK` | `""` | Refresh token from `?setup&docked=true`. |
+
+Turn a type off and Refresh — no re-setup needed (the token already carries every
+scope). Set all of them off (or leave the token blank) to run chat-only as before.
+
+### Alerts in a dock *and* on stream at the same time
+
+> **[`relay.py`](#sharing-one-connection-between-every-view-relaypy) already
+> handles this** — it holds the one EventSub session and feeds every page, so
+> both views show every alert with a single Twitch app and no
+> `?setup&docked=true` flow. Everything below only applies when you're running
+> without the relay.
+
+Twitch allows only **one** EventSub subscription per app + event type + channel.
+So if the Browser **source** and the `?docked=true` **dock** share one Twitch app,
+whichever connects first takes the alerts and the other reports
+`Alerts: already claimed…` and shows no alerts. Chat itself is unaffected — this
+is only about alerts/redeems.
+
+To get alerts in both, give the dock its own Twitch app:
+
+1. Register a **second** app at [dev.twitch.tv/console/apps](https://dev.twitch.tv/console/apps),
+   Redirect URL `http://localhost`.
+2. Paste its Client ID + Secret into `TWITCH_CLIENT_ID_DOCK` and
+   `TWITCH_CLIENT_SECRET_DOCK`, and save.
+3. Open the file with **`?setup&docked=true`** and run the two steps. The success
+   page tells you to paste into `TWITCH_REFRESH_TOKEN_DOCK` — do that and save.
+4. Refresh the dock. Its console logs
+   `using dock Twitch app (own alert subscriptions)`.
+
+All three `_DOCK` values must be filled in for the dock app to be used; if any is
+blank the dock falls back to the main app (and loses the race to the source).
+
+- **Leave them blank if you only want alerts on stream.** The dock still tries
+  once at startup, gets told the subscriptions are taken, and then stops — it
+  won't keep retrying or keep re-showing the status box.
+
+### Notes & gotchas
+
+- **Adding this to an existing redeems-only token:** if you set up channel points
+  before alerts existed, your old token is missing the newer scopes. Just run
+  `?setup` once more to re-grant them all — the status line nags you
+  (`re-run ?setup to grant the rest`) until you do.
+- **"Sound Alerts" extension:** sound redeems created with Twitch's official
+  *Sound Alerts extension* may **not** appear — only channel point rewards from
+  your dashboard (or tools like Streamer.bot) are guaranteed. Test one to be sure.
+- **Follow spam:** if you ever get follow-botted, set `SHOW_ALERTS.follows` to
+  `false` and Refresh.
+- **Preview the styling:** set `DEMO_MODE : true` and Refresh — fake subs, cheers,
+  raids, hype trains, follows, and redeems cycle through so you can check colors
+  and layout without waiting for real events.
+
 ## Dark Background (`?bg=dark`)
 
 The overlay is transparent by design so it composites cleanly over your video as
@@ -415,8 +776,29 @@ in using your API key. Put your own video ID back later.
 **Option 2 — test the look with fake messages (no stream, no key):** In the
 CONFIG set `DEMO_MODE : true` and Refresh. Fake Twitch + YouTube messages (with
 the occasional MOD / broadcaster tag) appear every ~1.2s so you can check the
-font, icons, fade-out, and layout. Set `DEMO_MODE` back to `false` before going
-live.
+font, icons, fade-out, and layout. Fake **alerts and redeems** (subs, cheers,
+raids, hype trains, follows, redemptions) also cycle through so you can preview
+their colored rows. Set `DEMO_MODE` back to `false` before going live.
+
+Demo mode lives in the relay, so **every open view shows the same fake feed** —
+a Browser source and a dock stay in step, which is what makes it useful for
+checking that a dock's layout matches the overlay.
+
+1. Set `relay.demo=true` in `app.properties`.
+2. Restart the relay (`start-relay.bat`).
+3. Refresh the pages.
+
+It generates fake Twitch and YouTube messages, role badges and alerts, and
+spends **no** API quota — no keys are touched.
+
+**Your own emotes show up.** The relay looks your channel's Twitch sub emotes up
+on [ivr.fi](https://api.ivr.fi) (public, no auth, the only network call demo
+makes) and weights them so they appear more often than the Twitch globals. Your
+YouTube member emotes come from `youtube.emotes` in `app.properties`. So demo is
+still the way to check that your emotes render at the right size. If ivr.fi is
+unreachable it quietly falls back to globals only.
+
+Set `relay.demo` back to `false` before going live.
 
 > **Tip while testing:** set `STATUS_HIDE_SEC : 0` so the connection box stays on
 > screen and you can confirm both platforms connected.
@@ -433,9 +815,21 @@ and reports exactly what each side is doing.
 | `YouTube: no API key set` | Paste your key into CONFIG. |
 | `YouTube: no active live chat` | The stream isn't live, or the video ID is wrong. YouTube only returns chat while the stream is actually LIVE. |
 | `YouTube API: ...` / 403 errors | Key not enabled for YouTube Data API v3, or the key has an HTTP-referrer restriction (set restrictions to None). |
-| `YouTube: quotaExceeded` | Daily API quota used up; resets at midnight US Pacific time. |
+| `YouTube: quotaExceeded` | Daily API quota used up; resets at midnight US Pacific time. Add a backup key to keep going. |
+| `YouTube: quota used up — switched to backup key 1/2` | Normal. The primary key drained and polling moved to a backup; chat continues uninterrupted. |
+| `YouTube: all N API keys out of quota` | Every key is drained. Raise `YT_MIN_POLL_MS`, add another backup key, or wait for the midnight US Pacific reset. |
 | `Twitch: connecting…` forever | Check the channel name is spelled correctly and lowercase. |
+| `Alerts: watching <you> (N event types)` | Alerts/redeems are working (N = how many event types subscribed; 8 with everything on). |
+| `Alerts: … re-run ?setup to grant the rest` | The token is missing some scopes — open `?setup` again and re-authorize. |
+| `Redeems: refresh token invalid — re-run ?setup` | The Twitch alerts token is dead or from the wrong app/account — regenerate it via `?setup`. |
+| `Redeems: off (open ?setup once to enable…)` | No Client ID / Secret / refresh token set — alerts are simply off (chat still works). |
 | Twitch connected but no messages | Nobody has chatted yet, or `SHOW_BACKLOG` is false so only new messages show. |
+| `Relay: connecting…` that never clears | `relay.py` isn't running, or it's on a different port than `RELAY_URL`. The page falls back to connecting directly after a moment. |
+| Setting `DEMO_MODE : true` seems to do nothing | You're on an older copy. Current builds check `DEMO_MODE` before the relay; the console logs `DEMO_MODE is on — ignoring the relay`. |
+| Another device can't load `http://<ip>:8777/` | `relay.host` is still `127.0.0.1`. Set it to `0.0.0.0` and restart — the relay prints the exact URL on startup. Also check both devices are on the same network. |
+| `Relay: lost connection, reconnecting…` | The relay stopped or was restarted. It reconnects on its own within a few seconds. |
+| Two views showing different chat | They aren't both on the relay. Check the relay window says `page connected (2 total)`, and that `RELAY_URL` is set in the HTML both are loading. |
+| Dock shows nothing while the source works | The dock is a follower but the leader hasn't posted a row yet — followers only show what arrives after the leader renders it. Wait for the next message, or confirm the leader says it's sharing with 1 view. |
 | Nothing appears at all | Right-click the OBS source → Refresh; confirm you picked the correct `.html` file. |
 
 To test outside OBS: just double-click `merged-chat.html` to open it in your

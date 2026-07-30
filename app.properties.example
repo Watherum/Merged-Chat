@@ -1,0 +1,144 @@
+# ===========================================================================
+#  Merged Chat relay configuration
+# ---------------------------------------------------------------------------
+#  Copy this file to  app.properties  and fill in your own values.
+#  app.properties is git-ignored because it holds real keys and tokens.
+#
+#      copy app.properties.example app.properties      (Windows)
+#      cp   app.properties.example app.properties      (macOS / Linux)
+#
+#  Then:  pip install websockets
+#         python relay.py
+# ===========================================================================
+
+
+# --- Twitch chat -----------------------------------------------------------
+# Channel names, lowercase, comma-separated. Chat is anonymous: no key needed.
+# Several channels are merged over one connection at no extra cost.
+twitch.channels=your_channel
+
+
+# --- YouTube live chat -----------------------------------------------------
+# The v=... id from the live stream URL. Comma-separate to merge several.
+# Leave blank to run Twitch only.
+youtube.video.ids=
+
+# YouTube Data API v3 keys, comma-separated, PRIMARY FIRST.
+#
+# Quota is granted per Google Cloud PROJECT (10,000 units/day, and each poll
+# costs 5). Extra keys must come from separate projects to bring fresh quota.
+# When one key runs dry the relay rolls onto the next instead of dropping
+# YouTube chat for the rest of the day.
+#
+# Application restrictions on the key must be NONE — an HTTP-referrer
+# restriction blocks these requests.
+youtube.api.keys=
+
+# Minimum milliseconds between polls of each YouTube chat. This is the quota
+# dial: 15000 (15s) ~= 8 hours of stream per key. Lower = snappier chat but a
+# shorter run. A 2s hard floor always applies.
+#   0      -> as fast as the API allows (~5s)  ~2.8 hr per key
+#   15000  -> every 15s                        ~8.3 hr per key
+#   30000  -> every 30s                       ~16.6 hr per key
+youtube.min.poll.ms=15000
+
+# How many consecutive failed polls before giving up on a chat (0 = never).
+youtube.max.retries=6
+# Ceiling for the retry backoff, in milliseconds.
+youtube.backoff.max.ms=300000
+
+
+# --- Twitch alerts & channel point redeems (optional) ----------------------
+# Subs, cheers, follows, raids, hype trains and channel point redemptions.
+# These need a one-time token. Easiest way to mint one: open
+#   merged-chat.html?setup
+# in a normal browser, follow the two steps, and paste the results here.
+# Leave blank to turn alerts off entirely — plain chat needs none of this.
+twitch.client.id=
+twitch.client.secret=
+twitch.refresh.token=
+
+# Which alert types to show. Turn any off with  false.
+alerts.redeems=true
+alerts.follows=true
+alerts.subs=true
+alerts.gift.subs=true
+alerts.cheers=true
+alerts.raids=true
+alerts.hype.train=true
+
+
+# --- Relay server ----------------------------------------------------------
+# Where the local WebSocket listens. Keep 127.0.0.1 unless you deliberately
+# want other machines on your network to be able to connect — this port is
+# unauthenticated, so 0.0.0.0 exposes your chat feed to the whole LAN.
+relay.host=127.0.0.1
+relay.port=8777
+
+# If that port is already in use, try this many consecutive ports upward.
+# The page scans the same range, so a fallback needs no config change.
+relay.port.attempts=10
+
+# How many recent rows to keep for replay, so a dock opened mid-stream gets
+# scroll-back instead of an empty feed. Match DOCK_MAX_MESSAGES in the page.
+relay.history=400
+
+# The relay also serves the overlay over plain HTTP on the same port, so another
+# device can just browse to it. This is the file it hands out.
+relay.page=merged-chat.html
+
+# Demo mode: generate fake messages instead of contacting Twitch/YouTube.
+# Unlike the page's own DEMO_MODE, this is generated once and fanned out, so
+# every open view shows the SAME fake chat. No API keys are touched.
+relay.demo=false
+
+# ===========================================================================
+#  Appearance  --  how the overlay LOOKS
+# ---------------------------------------------------------------------------
+#  These are sent to every open view when it connects, so this is the single
+#  place to change the look. Edit, restart the relay, refresh the page.
+#
+#  A page running WITHOUT the relay falls back to the defaults built into
+#  merged-chat.html instead.
+# ===========================================================================
+
+# Twitch usernames (lowercase, comma-separated) to mark as HEAD moderators -
+# they get a war-hammer icon instead of the normal green MOD tag.
+twitch.head.mods=
+
+# Base text size in pixels.
+style.font.size.px=24
+
+# How many messages stay on screen in normal (overlay) mode.
+style.max.messages=80
+
+# Docked mode (?docked=true): keep a long scroll-back history and disable
+# fade-out, so you can scroll up through the stream.
+style.dock.retain.all=true
+style.dock.max.messages=400
+
+# false = only show messages that arrive after the page loads.
+style.show.backlog=true
+
+# The small connection status box in the top-left.
+style.show.status=true
+# Seconds before it auto-hides. 0 = never hide.
+style.status.hide.sec=4
+
+# Fade old messages out after a while. Ignored in docked retain mode, where
+# history is kept on purpose.
+style.fade.out=false
+# Seconds a message lives before it starts fading (only when fade.out is true).
+style.message.life.sec=60
+# How long the fade animation takes, in seconds.
+style.fade.duration.sec=1
+
+# Background shade used when the URL has ?bg=dark. A stream Browser source
+# leaves it off and stays transparent.
+style.dark.bg.color=#2a2a2e
+
+# YouTube member / custom emotes, as  :code:=image-url  pairs, comma-separated.
+# YouTube's API sends these as plain text, so they only render as images if you
+# map them here. Example:
+#   youtube.emotes=:hearts:=https://example.com/hearts.png,:wave:=https://example.com/wave.png
+youtube.emotes=
