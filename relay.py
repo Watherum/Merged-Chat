@@ -30,6 +30,7 @@ Nothing is exposed off this machine: the listener binds 127.0.0.1 by default.
 """
 
 import asyncio
+import calendar
 import json
 import random
 import re
@@ -123,6 +124,11 @@ CFG = Config(load_properties(PROPS))
 
 TWITCH_CHANNELS = CFG.list("twitch.channels")
 YT_VIDEO_IDS = CFG.list("youtube.video.ids")
+# Channels to watch for a live broadcast, so the video ID doesn't have to be
+# pasted in before every stream. Accepts @handle, UC… id, or a channel URL.
+YT_CHANNEL_IDS = CFG.list("youtube.channel.ids")
+# How often to re-check an idle channel. Each scan costs 2 units.
+YT_SCAN_MS = CFG.int("youtube.scan.ms", 30000)
 YT_KEYS = CFG.list("youtube.api.keys")
 YT_MIN_POLL_MS = CFG.int("youtube.min.poll.ms", 15000)
 YT_MAX_RETRIES = CFG.int("youtube.max.retries", 6)
@@ -418,6 +424,54 @@ async def twitch_irc_task():
 # YouTube — poll each chat once, fail over between API keys on quota
 # --------------------------------------------------------------------------
 
+# Anything already in chat when the relay booted is backlog and gets skipped;
+# anything posted after is live and must be delivered. Using a wall-clock cutoff
+# rather than a "first poll" flag matters because the poll loop is re-entered on
+# every reconnect (stream not live yet, or a give-up/retry cycle) — a per-connect
+# flag silently ate a whole batch of *live* messages each time.
+# The 1s margin keeps a message posted in the same second the relay booted on
+# the live side of the line: showing a second of backlog is harmless, losing a
+# real message is the whole bug.
+YT_START = time.time() - 1.0
+
+# Guards the one path that deliberately re-requests a page it already fetched:
+# a key rotation re-polls the SAME pageToken, which would otherwise double-post.
+YT_SEEN = deque(maxlen=4000)
+YT_SEEN_SET = set()
+
+
+def yt_published_ts(item):
+    """snippet.publishedAt -> epoch seconds, or None when it can't be read.
+
+    None means 'deliver anyway' — dropping a message we merely failed to parse
+    is the exact failure this cutoff exists to prevent.
+    """
+    raw = ((item.get("snippet") or {}).get("publishedAt") or "").strip()
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})[Tt](\d{2}:\d{2}:\d{2})(?:\.(\d+))?", raw)
+    if not m:
+        return None
+    try:
+        base = calendar.timegm(
+            time.strptime(m.group(1) + " " + m.group(2), "%Y-%m-%d %H:%M:%S"))
+    except ValueError:
+        return None
+    return base + (float("0." + m.group(3)) if m.group(3) else 0.0)
+
+
+def yt_is_new(item):
+    """False for a message we've already broadcast. Unidentifiable = let it through."""
+    mid = item.get("id")
+    if not mid:
+        return True
+    if mid in YT_SEEN_SET:
+        return False
+    if len(YT_SEEN) == YT_SEEN.maxlen:      # deque is about to evict its oldest
+        YT_SEEN_SET.discard(YT_SEEN[0])
+    YT_SEEN.append(mid)
+    YT_SEEN_SET.add(mid)
+    return True
+
+
 class YouTube:
     def __init__(self):
         self.key_index = 0
@@ -463,6 +517,152 @@ class YouTube:
 
 
 YT = YouTube()
+
+
+class YTFatal(Exception):
+    """A YouTube error this task can't recover from — unwind and stop."""
+
+
+def yt_url(path, **params):
+    params["key"] = YT.key()
+    return "https://www.googleapis.com/youtube/v3/%s?%s" % (
+        path, urllib.parse.urlencode(params))
+
+
+async def yt_get(url, status_key):
+    """GET with the shared quota/rotation handling.
+
+    Returns the parsed body, or None when the caller should just try again
+    (network blip, or we rolled onto a backup key). Raises YTFatal when there's
+    no point retrying at all.
+    """
+    _, d = await http("GET", url)
+    if "__error__" in d:
+        return None
+    if "error" in d:
+        if await YT.is_fatal(d["error"], status_key):
+            raise YTFatal()
+        return None
+    return d
+
+
+def yt_channel_ref(raw):
+    """Normalise a configured channel to ('id'|'handle', value).
+
+    Accepts a bare UC… id, an @handle, or a full youtube.com URL of either.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return None
+    # Scheme optional — a pasted "youtube.com/@name" is just as likely as a full URL.
+    s = re.sub(r"^(https?://)?(www\.)?youtube\.com/", "", s, flags=re.I).strip("/")
+    if s.lower().startswith("channel/"):
+        s = s[len("channel/"):]
+    s = s.split("/")[0].split("?")[0]
+    if not s:
+        return None
+    if s.startswith("@"):
+        return ("handle", s[1:])
+    if re.fullmatch(r"UC[\w-]{22}", s):
+        return ("id", s)
+    return ("handle", s)
+
+
+async def yt_resolve_channel(ref, status_key):
+    """@handle -> UC… channel id. Returns None to retry. Costs 1 unit, once."""
+    kind, val = ref
+    params = {"part": "id", "id" if kind == "id" else "forHandle": val}
+    d = await yt_get(yt_url("channels", **params), status_key)
+    if d is None:
+        return None
+    items = d.get("items") or []
+    if not items:
+        await push_status(status_key, "YouTube: no such channel (%s)" % val)
+        raise YTFatal()
+    return items[0]["id"]
+
+
+async def yt_find_live(channel_id, status_key):
+    """The channel's current live stream, or None.
+
+    Costs 2 units: the uploads playlist id is derived from the channel id
+    (UC… -> UU…) instead of looked up, and a broadcast appears at the top of
+    that playlist as soon as it goes live — verified against a live channel.
+    The official alternative, search.list?eventType=live, costs 100.
+    """
+    d = await yt_get(yt_url("playlistItems", part="contentDetails",
+                            playlistId="UU" + channel_id[2:], maxResults=5),
+                     status_key)
+    if d is None:
+        return None
+    vids = [(i.get("contentDetails") or {}).get("videoId") for i in d.get("items") or []]
+    vids = [v for v in vids if v]
+    if not vids:
+        return None
+
+    d = await yt_get(yt_url("videos", part="snippet,liveStreamingDetails",
+                            id=",".join(vids)), status_key)
+    if d is None:
+        return None
+
+    by_id = {it.get("id"): it for it in d.get("items") or []}
+    for vid in vids:                     # newest first, as the playlist ordered them
+        it = by_id.get(vid)
+        if not it:
+            continue
+        chat_id = (it.get("liveStreamingDetails") or {}).get("activeLiveChatId")
+        if chat_id:
+            return vid, chat_id, (it.get("snippet") or {}).get("channelTitle", "channel")
+    return None
+
+
+async def youtube_channel_task(raw, status_key):
+    """Watch a channel: scan until it's live, poll its chat, then scan again."""
+    if not YT_KEYS:
+        await push_status(status_key, "YouTube: no API key set (Twitch only)")
+        return
+
+    ref = yt_channel_ref(raw)
+    if ref is None:
+        return
+    label = "@" + ref[1] if ref[0] == "handle" else ref[1]
+
+    channel_id = None
+    waiting = False
+    fails = 0
+
+    try:
+        while not YT.exhausted:
+            if channel_id is None:
+                channel_id = await yt_resolve_channel(ref, status_key)
+                if channel_id is None:
+                    fails += 1
+                    if 0 < YT_MAX_RETRIES < fails:
+                        await push_status(status_key, "YouTube: gave up resolving " + label)
+                        return
+                    await asyncio.sleep(YT.backoff_ms(fails) / 1000.0)
+                    continue
+                fails = 0
+
+            found = await yt_find_live(channel_id, status_key)
+            if found is None:
+                if not waiting:
+                    await push_status(status_key,
+                                      "YouTube: %s isn't live yet — watching" % label)
+                    waiting = True
+                await asyncio.sleep(max(YT_SCAN_MS, 5000) / 1000.0)
+                continue
+
+            video_id, chat_id, title = found
+            waiting = False
+            await push_status(status_key, "YouTube: connected to " + title)
+            # The scan already handed us the chat id, so skip yt_connect entirely.
+            await yt_poll_loop(chat_id, video_id, status_key)
+            if YT.exhausted:
+                return
+            await asyncio.sleep(5)       # stream ended (or dropped) — rescan
+    except YTFatal:
+        return
 
 
 async def youtube_task(video_id, status_key):
@@ -516,7 +716,6 @@ async def yt_connect(video_id, status_key):
 
 async def yt_poll_loop(chat_id, video_id, status_key):
     page_token = ""
-    first = True
     fails = 0
 
     while not YT.exhausted:
@@ -551,11 +750,16 @@ async def yt_poll_loop(chat_id, video_id, status_key):
             continue
 
         fails = 0
-        # Skip the backlog that exists at startup; pages want live-from-now.
-        if not first:
-            for it in d.get("items") or []:
-                await broadcast({"t": "yt", "videoId": video_id, "item": it})
-        first = False
+        # Skip the backlog that existed when the relay started; pages want
+        # live-from-now. Everything posted since is live, including the first
+        # batch after a reconnect.
+        for it in d.get("items") or []:
+            ts = yt_published_ts(it)
+            if ts is not None and ts < YT_START:
+                continue
+            if not yt_is_new(it):
+                continue
+            await broadcast({"t": "yt", "videoId": video_id, "item": it})
 
         page_token = d.get("nextPageToken", "")
         wait = max(d.get("pollingIntervalMillis") or 5000, max(YT_MIN_POLL_MS, 2000))
@@ -640,7 +844,10 @@ def alert_sub_defs():
     if ALERT_FLAGS["raids"]:
         defs.append(("channel.raid", "1", None, {"to_broadcaster_user_id": bid}))
     if ALERT_FLAGS["hypeTrain"]:
-        defs.append(("channel.hype_train.begin", "1", "channel:read:hype_train",
+        # v2 only — Twitch retired version 1, which now 400s with
+        # "invalid subscription type and version". v2 still carries `level`,
+        # which is all the overlay reads.
+        defs.append(("channel.hype_train.begin", "2", "channel:read:hype_train",
                      {"broadcaster_user_id": bid}))
     return defs
 
@@ -850,6 +1057,8 @@ async def main():
     log("Merged Chat relay starting")
     log("  twitch channels :", ", ".join(TWITCH_CHANNELS) or "(none)")
     log("  youtube videos  :", ", ".join(YT_VIDEO_IDS) or "(none)")
+    log("  youtube channels:", ", ".join(YT_CHANNEL_IDS) or "(none)",
+        "(scan every %ds)" % (max(YT_SCAN_MS, 5000) // 1000) if YT_CHANNEL_IDS else "")
     log("  youtube keys    :", "%d (1 primary + %d backup)" % (len(YT_KEYS), max(len(YT_KEYS) - 1, 0))
         if YT_KEYS else "(none)")
     log("  alerts          :", "on" if (TW_CLIENT_ID and TW_REFRESH) else "off")
@@ -867,9 +1076,14 @@ async def main():
     else:
         tasks = [asyncio.create_task(twitch_irc_task()),
                  asyncio.create_task(eventsub_task())]
-        for i, vid in enumerate(YT_VIDEO_IDS):
+        # Pinned video IDs first, then watched channels — one status slot each.
+        yt_sources = ([("video", v) for v in YT_VIDEO_IDS] +
+                      [("channel", c) for c in YT_CHANNEL_IDS])
+        for i, (kind, val) in enumerate(yt_sources):
             key = "youtube" if i == 0 else "youtube%d" % (i + 1)
-            tasks.append(asyncio.create_task(youtube_task(vid, key)))
+            tasks.append(asyncio.create_task(
+                youtube_task(val, key) if kind == "video"
+                else youtube_channel_task(val, key)))
 
     # Bind the configured port, walking upwards if it's taken — a leftover relay,
     # another app, or a second copy for a different channel. The page scans the

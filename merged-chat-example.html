@@ -1288,7 +1288,8 @@ function alertSubDefs() {
   if (a.raids)
     defs.push({ type: "channel.raid", version: "1", scope: null, condition: { to_broadcaster_user_id: bid } });
   if (a.hypeTrain)
-    defs.push({ type: "channel.hype_train.begin", version: "1", scope: "channel:read:hype_train", condition: { broadcaster_user_id: bid } });
+    // v2 only — Twitch retired version 1 ("invalid subscription type and version").
+    defs.push({ type: "channel.hype_train.begin", version: "2", scope: "channel:read:hype_train", condition: { broadcaster_user_id: bid } });
   return defs;
 }
 
@@ -1607,7 +1608,7 @@ async function startYouTubeVideo(videoId, statusKey) {
     const channel = item?.snippet?.channelTitle || "channel";
     reconnectStatus(statusKey, "YouTube: connected to " + channel);
     statusConnected[statusKey] = true;
-    pollYouTube(chatId, "", true, statusKey);
+    pollYouTube(chatId, "", statusKey);
   } catch (e) {
     status(statusKey, "YouTube error: " + e.message);
   }
@@ -1628,7 +1629,35 @@ function addYouTubeItem(it) {
   });
 }
 
-async function pollYouTube(chatId, pageToken, first, statusKey, fails = 0) {
+// Anything already in chat when the page loaded is backlog; anything posted
+// after is live. A wall-clock cutoff survives reconnects, where the old
+// "first poll" flag discarded a whole batch of *live* messages each time.
+// The 1s margin keeps a message posted in the same second the page loaded on
+// the live side of the line: a second of backlog is harmless, losing a real
+// message is the whole bug.
+const YT_START_MS = Date.now() - 1000;
+const ytSeen = new Set();
+
+// snippet.publishedAt -> epoch ms, or null when unreadable. Null means deliver
+// anyway: dropping a message we merely failed to parse is the bug being fixed.
+function ytPublishedMs(it) {
+  const raw = ((it.snippet || {}).publishedAt || "").trim();
+  if (!raw) return null;
+  const t = Date.parse(raw);
+  return Number.isNaN(t) ? null : t;
+}
+
+// Guards the one path that re-requests a page it already fetched: a key
+// rotation re-polls the SAME pageToken, which would otherwise double-post.
+function ytIsNew(it) {
+  if (!it.id) return true;
+  if (ytSeen.has(it.id)) return false;
+  if (ytSeen.size >= 4000) ytSeen.clear();  // bounded; ids only need to stay fresh
+  ytSeen.add(it.id);
+  return true;
+}
+
+async function pollYouTube(chatId, pageToken, statusKey, fails = 0) {
   if (ytQuotaExhausted) return;   // another loop already drained this key
 
   try {
@@ -1645,23 +1674,28 @@ async function pollYouTube(chatId, pageToken, first, statusKey, fails = 0) {
       // Rolled onto a backup key — re-poll the SAME pageToken shortly, so the
       // switch costs no messages and doesn't go through the backoff path.
       if (ytKeyIndex !== keyBefore) {
-        setTimeout(() => pollYouTube(chatId, pageToken, first, statusKey, 0), 1000);
+        setTimeout(() => pollYouTube(chatId, pageToken, statusKey, 0), 1000);
         return;
       }
       // Anything else (rate limit, 5xx, unknown) goes to the backoff path.
       throw new Error(d.error.message || ytErrorReason(d.error) || "API error");
     }
 
-    // Skip the initial backlog so we start clean (unless SHOW_BACKLOG is on)
-    if (!(first && !CONFIG.SHOW_BACKLOG)) {
-      for (const it of d.items || []) addYouTubeItem(it);
+    // Skip the backlog that existed when the page loaded (unless SHOW_BACKLOG
+    // is on). Everything posted since is live — including the first batch
+    // after a reconnect, which used to be thrown away.
+    for (const it of d.items || []) {
+      const ts = ytPublishedMs(it);
+      if (!CONFIG.SHOW_BACKLOG && ts !== null && ts < YT_START_MS) continue;
+      if (!ytIsNew(it)) continue;
+      addYouTubeItem(it);
     }
 
     // Respect the API's suggested interval, but never faster than 2s, and never
     // faster than YT_MIN_POLL_MS (the quota saver — 15s by default).
     const floor = Math.max(CONFIG.YT_MIN_POLL_MS || 0, 2000);
     const wait = Math.max(d.pollingIntervalMillis || 5000, floor);
-    setTimeout(() => pollYouTube(chatId, d.nextPageToken, false, statusKey, 0), wait);
+    setTimeout(() => pollYouTube(chatId, d.nextPageToken, statusKey, 0), wait);
   } catch (e) {
     // Transient failure: back off, and stop entirely once we've tried enough.
     const tries = fails + 1;
@@ -1673,7 +1707,7 @@ async function pollYouTube(chatId, pageToken, first, statusKey, fails = 0) {
     const wait = ytBackoffMs(tries);
     reconnectStatus(statusKey, `YouTube: retrying in ${Math.round(wait / 1000)}s` +
                       (max > 0 ? ` (${tries}/${max})` : "") + ` — ${e.message}`);
-    setTimeout(() => pollYouTube(chatId, pageToken, first, statusKey, tries), wait);
+    setTimeout(() => pollYouTube(chatId, pageToken, statusKey, tries), wait);
   }
 }
 

@@ -147,6 +147,41 @@ YT_VIDEO_IDS : ["VIDEO_ID_2", "VIDEO_ID_3"],
 > [backup keys](#backup-api-keys-for-when-quota-runs-out-yt_api_key_backup) from
 > extra Google Cloud projects, raise `YT_MIN_POLL_MS`, or request a quota increase.
 
+### Auto-detecting your live stream (`youtube.channel.ids`, relay only)
+
+YouTube mints a **new video ID for every broadcast**, so pinning
+`youtube.video.ids` means editing `app.properties` before each stream — and a
+forgotten edit fails quietly: the relay just reports *"no active live chat"* and
+never delivers a message.
+
+Instead, point the relay at the **channel** and let it find the current stream:
+
+```properties
+youtube.channel.ids=@your_channel
+youtube.scan.ms=30000
+```
+
+Accepts an `@handle`, a `UC…` channel id, or a channel URL; comma-separate to
+watch several. While the channel is offline the relay reports *"@name isn't live
+yet — watching"* and re-checks on `youtube.scan.ms`. When you go live it picks up
+the video ID, connects, and stops scanning. When the stream ends it goes back to
+watching, so an OBS source left running overnight reconnects by itself.
+
+**Cost: 2 units per scan.** The uploads playlist id is derived from the channel
+id (`UC…` → `UU…`) rather than looked up, and a broadcast appears at the top of
+that playlist the moment it goes live. At 30s that's ~240 units/hr while idle,
+against a 10,000/day budget. The official alternative — `search.list` with
+`eventType=live` — returns the same answer but costs **100 units a call**, which
+would drain a key in under two hours of waiting.
+
+> **⚠️ Check the handle.** A channel's `@handle` isn't always the obvious one,
+> and an unused placeholder channel with a similar name will resolve fine but
+> never go live — leaving you with a relay that watches forever and never
+> connects. If in doubt, use the `UC…` id from the channel page URL.
+
+`youtube.video.ids` still works and can be combined with this — use it to pin one
+specific broadcast, or to merge in someone else's stream.
+
 ### Controlling YouTube quota usage (polling rate)
 
 YouTube quota is spent on **how often** the page polls for new messages. Each

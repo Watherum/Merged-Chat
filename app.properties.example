@@ -19,8 +19,26 @@ twitch.channels=your_channel
 
 
 # --- YouTube live chat -----------------------------------------------------
-# The v=... id from the live stream URL. Comma-separate to merge several.
-# Leave blank to run Twitch only.
+# RECOMMENDED: watch a channel instead of a video. The relay finds whatever it
+# is currently streaming, so you never edit this file before a broadcast, and a
+# forgotten edit can't silently leave YouTube chat missing.
+#
+# Accepts an @handle, a UC… channel id, or a channel URL. Comma-separate to
+# watch several. Leave blank to run Twitch only.
+#
+# Careful with handles: a channel's @handle is not always the obvious one, and
+# an unused placeholder channel of the same name will resolve but never go
+# live. If in doubt use the UC… id from the channel's page URL.
+youtube.channel.ids=@your_channel
+
+# How often to re-check a channel that isn't live yet, in milliseconds.
+# Each scan costs 2 API units (playlistItems + videos), so 30s ~= 240 units/hr
+# while waiting. Scanning stops entirely once a stream is found. 5s floor.
+youtube.scan.ms=30000
+
+# Optional, and usually unnecessary if youtube.channel.ids is set: the v=... id
+# from a live stream URL. Use it to pin one specific broadcast, or to merge in
+# someone else's stream. Comma-separate to merge several.
 youtube.video.ids=
 
 # YouTube Data API v3 keys, comma-separated, PRIMARY FIRST.
