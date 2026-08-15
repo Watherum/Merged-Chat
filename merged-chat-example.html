@@ -176,6 +176,11 @@ const CONFIG = {
   SHOW_BACKLOG   : false, // false = only show NEW messages after load (recommended).
                           // YouTube-only: Twitch IRC sends no history on connect,
                           // so Twitch is always live-from-join regardless of this.
+  SHOW_DELETED   : false, // what to do when a moderator deletes a message (or times
+                          // out / bans its author). false = take the message off the
+                          // feed entirely; true = keep the row and replace its text
+                          // with "message deleted", which is often what you want in
+                          // an OBS dock where you're watching moderation happen.
   SHOW_STATUS    : true,  // show the small connection status line (top-left)
   STATUS_HIDE_SEC : 12,   // seconds before the status box auto-hides (0 = never hide)
   FONT_SIZE_PX   : 18,    // base text size
@@ -284,6 +289,11 @@ const CONFIG = {
   .name::after { content: ":"; color: #fff; }
 
   .text { color: #fff; }
+
+  /* a moderator-deleted message, when SHOW_DELETED is on (otherwise the whole
+     row is removed and this never shows) */
+  .msg.deleted .text { color: #b9b9c2; font-style: italic; }
+  .msg.deleted .name { opacity: 0.6; }
 
   .emote {
     height: 1.4em;
@@ -613,9 +623,16 @@ const RAID_ICON =
 const HYPE_ICON =
   `<svg viewBox="0 0 24 24" aria-label="Hype Train"><path d="M13 2 3 14h7l-1 8 11-13h-8z"/></svg>`;
 
-function addMessage({ platform, name, color, html, owner, headMod, mod, vip, sub, subMonths, member }) {
+// `msgId`, `userId`, `login` and `room` are only used to find this row again when
+// a moderator deletes it (see removeMessages); everything else is presentation.
+function addMessage({ platform, name, color, html, owner, headMod, mod, vip, sub, subMonths, member,
+                      msgId, userId, login, room }) {
   const row = document.createElement("div");
   row.className = "msg " + platform;
+  if (msgId) row.dataset.mid = msgId;
+  if (userId) row.dataset.uid = userId;
+  if (login) row.dataset.login = String(login).toLowerCase();
+  if (room) row.dataset.room = room;
 
   let tagHtml = "";
   if (owner) tagHtml += `<span class="tag owner">${CAMERA_ICON}</span>`;
@@ -634,6 +651,28 @@ function addMessage({ platform, name, color, html, owner, headMod, mod, vip, sub
     `<span class="text">${html}</span>`;
 
   placeRow(row);
+}
+
+// Retract messages a moderator deleted: `match(row)` picks which rows go.
+// With SHOW_DELETED off the row leaves the feed entirely (what an on-stream
+// overlay wants); with it on the row stays as a "message deleted" placeholder.
+// Rows are scanned rather than looked up by selector because message IDs are
+// opaque strings from two different services — iterating a few hundred rows on
+// an event this rare is cheaper than getting attribute-selector escaping wrong.
+function removeMessages(match) {
+  let n = 0;
+  for (const row of Array.from(feed.children)) {
+    if (row.classList.contains("deleted") || !match(row)) continue;
+    n++;
+    if (CONFIG.SHOW_DELETED) {
+      row.classList.add("deleted");
+      const text = row.querySelector(".text");
+      if (text) text.textContent = "message deleted";
+    } else {
+      row.remove();
+    }
+  }
+  return n;
 }
 
 // Append a finished row, then trim to the cap, auto-scroll (docked mode) and
@@ -780,24 +819,6 @@ function connectRelay(onFallback, offset) {
   };
 
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
-}
-
-// Adopt the appearance settings the relay read out of app.properties. That file
-// is the single place to change how chat looks once you're running the relay;
-// the CONFIG block above is only what a page falls back to without one.
-// Unknown or missing keys are left at their defaults, so an older app.properties
-// keeps working.
-function applyRelayConfig(cfg) {
-  if (!cfg || typeof cfg !== "object") return;
-  let changed = 0;
-  for (const k in cfg) {
-    if (cfg[k] === null || cfg[k] === undefined) continue;
-    CONFIG[k] = cfg[k];
-    changed++;
-  }
-  if (!changed) return;
-  applyVisualConfig();
-  console.log("[merged-chat] relay: applied " + changed + " settings from app.properties");
 }
 
 // Adopt the appearance settings the relay read out of app.properties. That file
@@ -977,6 +998,28 @@ function connectTwitch() {
 // feed in lines the relay read on its behalf — same parsing either way.
 function handleIrcLine(line) {
       const m = parseIRC(line);
+
+      // Moderation. CLEARMSG deletes one message (target-msg-id matches the `id`
+      // tag the PRIVMSG carried). CLEARCHAT with a target is a timeout or ban,
+      // which wipes everything that user had said; with no target it's a /clear
+      // of that channel alone — the other merged channels keep their messages.
+      if (m.command === "CLEARMSG") {
+        const id = m.tags["target-msg-id"];
+        if (id) removeMessages(r => r.dataset.mid === id);
+        return;
+      }
+      if (m.command === "CLEARCHAT") {
+        const uid = m.tags["target-user-id"];
+        const login = (m.text || "").trim().toLowerCase();
+        const room = (m.middle || "").trim().replace(/^#/, "").toLowerCase();
+        removeMessages(r =>
+          r.classList.contains("tw") && (
+            (uid || login)
+              ? ((uid && r.dataset.uid === uid) || (login && r.dataset.login === login))
+              : (!room || r.dataset.room === room)));
+        return;
+      }
+
       if (m.command !== "PRIVMSG") return;
 
       const nick = m.prefix.split("!")[0];
@@ -1004,6 +1047,10 @@ function handleIrcLine(line) {
         vip: badges.includes("vip"),
         sub: isSub,
         subMonths: subMatch ? subMatch[1] : "",
+        msgId: m.tags["id"],
+        userId: m.tags["user-id"],
+        login: nick,
+        room: (m.middle || "").trim().replace(/^#/, "").toLowerCase(),
       });
 }
 
@@ -1618,14 +1665,33 @@ async function startYouTubeVideo(videoId, statusKey) {
 // in items the relay fetched on its behalf — same rendering either way.
 function addYouTubeItem(it) {
   const a = it.authorDetails || {};
+  const sn = it.snippet || {};
+
+  // Moderation, mirroring the Twitch CLEARMSG / CLEARCHAT handling above. These
+  // only reach us when the poll is authorized as the owner or a moderator, so
+  // with a plain API key they normally never arrive — handling them costs
+  // nothing and stops a delete event rendering as an empty message if it does.
+  if (sn.type === "messageDeletedEvent") {
+    const id = (sn.messageDeletedDetails || {}).deletedMessageId;
+    if (id) removeMessages(r => r.dataset.mid === id);
+    return;
+  }
+  if (sn.type === "userBannedEvent") {
+    const banned = ((sn.userBannedDetails || {}).bannedUserDetails || {}).channelId;
+    if (banned) removeMessages(r => r.classList.contains("yt") && r.dataset.uid === banned);
+    return;
+  }
+
   addMessage({
     platform: "yt",
     name: a.displayName,
     color: colorFor(a.displayName),
-    html: renderYouTube((it.snippet || {}).displayMessage || ""),
+    html: renderYouTube(sn.displayMessage || ""),
     owner: a.isChatOwner,
     mod: a.isChatModerator,
     member: a.isChatSponsor,
+    msgId: it.id,
+    userId: a.channelId,
   });
 }
 

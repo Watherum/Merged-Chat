@@ -55,6 +55,8 @@ Keep all files together in the same folder.
 - Optionally, Twitch **alerts and channel point redeems** (subs, cheers, follows,
   raids, hype trains, redemptions) appear as distinct colored rows — see [Twitch
   Alerts & Channel Point Redeems](#twitch-alerts--channel-point-redeems-optional).
+- Messages a Twitch mod deletes (or that vanish with a timeout or ban) come off
+  the overlay too — see [Deleted messages](#deleted-messages).
 - New messages pop in with a quick animation.
 - All text has a black outline so it stays readable over any video, and the page
   background is transparent for OBS.
@@ -502,10 +504,42 @@ demo's YouTube rows.
 | `DOCK_RETAIN_ALL` | `true` | Docked mode only: keep a long scroll-back history (`DOCK_MAX_MESSAGES`) and allow scrolling up through it, with fade-out disabled. Override per-dock with `&retain=0`. See [Keeping a long history & scrolling back](#keeping-a-long-history--scrolling-back-dock_retain_all). |
 | `DOCK_MAX_MESSAGES` | `400` | Size of the docked scroll-back buffer (how many messages are kept when `DOCK_RETAIN_ALL` is on). |
 | `SHOW_BACKLOG` | `false` | `false` = only show new messages after load (recommended). `true` = also show recent messages that already existed when it loaded. **YouTube only** — Twitch connects via anonymous IRC, which sends no history on join, so Twitch always starts live-from-connect regardless of this setting. |
+| `SHOW_DELETED` | `false` | What happens when a moderator deletes a message (or times a user out / bans them) — see [Deleted messages](#deleted-messages). `false` = the message disappears from the feed too. `true` = the row stays, greyed out and reading *message deleted*. |
 | `SHOW_STATUS` | `true` | Show the connection status box, top-left (set to `false` to hide it completely). |
 | `STATUS_HIDE_SEC` | `12` | Seconds the status box stays on screen before fading out. Set to `0` to keep it visible permanently (handy while testing). |
 | `FONT_SIZE_PX` | `24` | Base text size (see [Changing the Font](#changing-the-font)). |
 | `DARK_BG_COLOR` | `"#2a2a2e"` | Background shade used **only** when the page is opened with `?bg=dark` (see [Dark Background for an OBS Dock](#dark-background-for-an-obs-dock)). No effect on the normal transparent overlay. |
+
+### Deleted messages
+
+When a Twitch moderator deletes a message, times a chatter out, or bans them,
+Twitch tells every connected client — including this overlay. By default the
+message is taken straight off the feed, so what a mod removed from chat does not
+stay sitting on your stream.
+
+Three things can arrive:
+
+| What a mod did | What Twitch sends | What the overlay does |
+| --- | --- | --- |
+| Deleted one message | `CLEARMSG` | Removes that one message. |
+| Timed out or banned a user | `CLEARCHAT` (with a target) | Removes **every** message that user had on screen. |
+| Ran `/clear` | `CLEARCHAT` (no target) | Clears that channel's messages. If you merge several Twitch channels, the others are left alone. |
+
+Set `SHOW_DELETED` to `true` to keep the row instead — greyed out, italic, and
+reading *message deleted*. That's usually what you want in an OBS **dock**,
+where you're watching moderation happen, and not what you want on stream.
+
+With `relay.py` running, the delete is forwarded to every view at once and is
+kept in the replay history, so a dock you open afterwards replays the deletion
+along with the messages and never shows the deleted one at all.
+
+Notes:
+
+- This only needs anonymous IRC — no token, no scopes, nothing to set up.
+- **YouTube:** the same handling is in place, but YouTube only reports deletions
+  to a poll authorized as the channel owner or a moderator. This overlay polls
+  with a plain API key, so in practice YouTube deletions don't come through; a
+  deleted YouTube message just stops appearing in new polls.
 
 ### Optional — fade-out (auto-remove old messages)
 
@@ -825,6 +859,11 @@ checking that a dock's layout matches the overlay.
 
 It generates fake Twitch and YouTube messages, role badges and alerts, and
 spends **no** API quota — no keys are touched.
+
+It also "moderates" itself now and then — every so often one of the fake
+messages is deleted, or a fake user is timed out and loses all of theirs. That's
+how you preview [deleted messages](#deleted-messages), and the `SHOW_DELETED`
+setting, without needing a real mod action on a live channel.
 
 **Your own emotes show up.** The relay looks your channel's Twitch sub emotes up
 on [ivr.fi](https://api.ivr.fi) (public, no auth, the only network call demo

@@ -138,6 +138,11 @@ style.dock.max.messages=400
 # false = only show messages that arrive after the page loads.
 style.show.backlog=true
 
+# What happens when a moderator deletes a message, times a user out, or bans
+# them: false takes the message straight off the feed (best on stream), true
+# leaves the row behind reading "message deleted" (handy in an OBS dock).
+style.show.deleted=false
+
 # The small connection status box in the top-left.
 style.show.status=true
 # Seconds before it auto-hides. 0 = never hide.

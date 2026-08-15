@@ -41,6 +41,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from collections import deque
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -184,6 +185,7 @@ def appearance():
         "DOCK_RETAIN_ALL": CFG.bool("style.dock.retain.all", True),
         "DOCK_MAX_MESSAGES": CFG.int("style.dock.max.messages", 400),
         "SHOW_BACKLOG": CFG.bool("style.show.backlog", True),
+        "SHOW_DELETED": CFG.bool("style.show.deleted", False),
         "SHOW_STATUS": CFG.bool("style.show.status", True),
         "STATUS_HIDE_SEC": CFG.int("style.status.hide.sec", 4),
         "FONT_SIZE_PX": CFG.int("style.font.size.px", 24),
@@ -409,10 +411,15 @@ async def twitch_irc_task():
                         if line.startswith("PING"):
                             await ws.send("PONG :tmi.twitch.tv")
                             continue
-                        # Only chat messages are worth forwarding; the pages
-                        # parse the raw line exactly as if they'd read it off
-                        # their own socket.
-                        if " PRIVMSG " in line:
+                        # Only chat messages and moderation are worth forwarding;
+                        # the pages parse the raw line exactly as if they'd read
+                        # it off their own socket. CLEARMSG (one deleted message)
+                        # and CLEARCHAT (timeout, ban, or /clear) go into the
+                        # replay history alongside the PRIVMSGs they retract, so
+                        # a dock that connects later replays the delete too and
+                        # never shows the message at all.
+                        if (" PRIVMSG " in line or " CLEARMSG " in line
+                                or " CLEARCHAT " in line):
                             await broadcast({"t": "irc", "line": line})
         except Exception as e:
             log("twitch irc error:", e)
@@ -975,6 +982,10 @@ async def demo_task():
     yt_codes = list(yt_emote_map().keys())
     log("demo: %d YouTube emotes from app.properties" % len(yt_codes))
 
+    # The last few fake Twitch messages, so the demo can "moderate" one and you
+    # can see a delete land without needing a real mod action on a live channel.
+    recent = deque(maxlen=12)
+
     while True:
         await asyncio.sleep(1.2)
         name = random.choice(DEMO_NAMES)
@@ -1028,11 +1039,28 @@ async def demo_task():
             elif 0.55 < roll <= 0.78:
                 badges.append("subscriber/%d" % random.choice([2, 6, 12]))
             colour = "#%06x" % random.randint(0x333333, 0xFFFFFF)
-            line = ("@badges=%s;color=%s;display-name=%s;emotes=%s "
+            # Real messages carry an `id` and `user-id`; the pages key deletes
+            # off them, so the demo has to send them too or nothing is deletable.
+            msg_id = str(uuid.uuid4())
+            user_id = str(abs(hash(name.lower())) % 900000000 + 100000000)
+            line = ("@badges=%s;color=%s;display-name=%s;emotes=%s;id=%s;user-id=%s "
                     ":%s!%s@%s.tmi.twitch.tv PRIVMSG #%s :%s"
-                    % (",".join(badges), colour, name, emote_tag,
+                    % (",".join(badges), colour, name, emote_tag, msg_id, user_id,
                        name.lower(), name.lower(), name.lower(), channel, text))
+            recent.append((msg_id, user_id, name.lower()))
             await broadcast({"t": "irc", "line": line})
+
+        # Occasionally "moderate" one of the recent fakes: mostly a single
+        # deleted message, sometimes a timeout that takes all of that user's.
+        if len(recent) == recent.maxlen and random.random() < 0.08:
+            msg_id, user_id, login = random.choice(list(recent))
+            if random.random() < 0.75:
+                clear = ("@login=%s;target-msg-id=%s :tmi.twitch.tv CLEARMSG #%s :demo"
+                         % (login, msg_id, channel))
+            else:
+                clear = ("@ban-duration=60;target-user-id=%s :tmi.twitch.tv CLEARCHAT #%s :%s"
+                         % (user_id, channel, login))
+            await broadcast({"t": "irc", "line": clear})
 
         # An occasional alert, in EventSub's payload shape.
         if random.random() < 0.12:
